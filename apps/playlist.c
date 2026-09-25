@@ -1229,6 +1229,110 @@ static int remove_all_tracks_unlocked(struct playlist_info *playlist, bool write
 }
 
 /*
+ * Insert gap: while an insert context is adding tracks one after another at
+ * consecutive positions (Insert, Insert next, Insert last with a rotated
+ * playlist, ...) the tail of the index array is parked at the end of the
+ * buffer, so each new track is placed in O(1) instead of shifting every
+ * following entry. While the gap is open, logical entries [pos, amount) are
+ * stored at [pos + len, amount + len). It must be closed before anything
+ * else reads the indices; the insert context holds the playlist lock the
+ * whole time.
+ */
+static struct
+{
+    struct playlist_info *playlist; /* batching enabled for this playlist */
+    int pos;                        /* logical position of the gap        */
+    int len;                        /* gap size in entries, 0 = closed    */
+} insert_gap;
+
+static void move_indices(struct playlist_info *playlist,
+                         int dst, int src, int count)
+{
+    if (count <= 0 || dst == src)
+        return;
+
+    memmove(&playlist->indices[dst], &playlist->indices[src],
+            count * sizeof(*playlist->indices));
+#ifdef HAVE_DIRCACHE
+    if (playlist->dcfrefs_handle)
+    {
+        struct dircache_fileref *dcfrefs =
+            core_get_data(playlist->dcfrefs_handle);
+        memmove(&dcfrefs[dst], &dcfrefs[src], count * sizeof(*dcfrefs));
+    }
+#endif
+}
+
+static void insert_gap_close(struct playlist_info *playlist)
+{
+    if (insert_gap.playlist != playlist || insert_gap.len == 0)
+        return;
+
+    move_indices(playlist, insert_gap.pos, insert_gap.pos + insert_gap.len,
+                 playlist->amount - insert_gap.pos);
+    insert_gap.len = 0;
+}
+
+static void insert_gap_open(struct playlist_info *playlist, int pos)
+{
+    int len = playlist->max_playlist_size - playlist->amount;
+
+    move_indices(playlist, pos + len, pos, playlist->amount - pos);
+    insert_gap.pos = pos;
+    insert_gap.len = len;
+}
+
+/* read an index entry, accounting for an open insert gap */
+static unsigned long get_index_entry(const struct playlist_info *playlist,
+                                     int index)
+{
+    if (insert_gap.playlist == playlist && insert_gap.len > 0 &&
+        index >= insert_gap.pos)
+        index += insert_gap.len;
+
+    return playlist->indices[index];
+}
+
+/*
+ * Make room for one entry at insert_position. Uses the insert gap when
+ * batching is enabled for this playlist, otherwise shifts the tail.
+ */
+static void make_room_for_track(struct playlist_info *playlist,
+                                int insert_position)
+{
+    if (insert_gap.playlist == playlist)
+    {
+        if (insert_gap.len > 0 && insert_gap.pos != insert_position)
+        {
+            /* move the gap, only the entries in between need to move */
+            if (insert_position < insert_gap.pos)
+                move_indices(playlist, insert_position + insert_gap.len,
+                             insert_position, insert_gap.pos - insert_position);
+            else
+                move_indices(playlist, insert_gap.pos,
+                             insert_gap.pos + insert_gap.len,
+                             insert_position - insert_gap.pos);
+            insert_gap.pos = insert_position;
+        }
+
+        if (insert_gap.len == 0 && insert_position < playlist->amount)
+            insert_gap_open(playlist, insert_position);
+
+        if (insert_gap.len > 0)
+        {
+            /* entry is written at insert_position, just shrink the gap */
+            insert_gap.pos++;
+            insert_gap.len--;
+            return;
+        }
+        /* appending at the end, nothing to move */
+    }
+
+    move_indices(playlist, insert_position + 1, insert_position,
+                 playlist->amount - insert_position);
+}
+
+/*
  * Add track to playlist at specified position. There are seven special
  * positions that can be specified:
  *  PLAYLIST_PREPEND              - Add track at beginning of playlist
@@ -1253,7 +1357,6 @@ static int add_track_to_playlist_unlocked(struct playlist_info* playlist,
 {
     int insert_position, orig_position;
     unsigned long flags = PLAYLIST_INSERT_TYPE_INSERT;
-    int i;
 
     insert_position = orig_position = position;
 
@@ -1273,7 +1376,7 @@ static int add_track_to_playlist_unlocked(struct playlist_info* playlist,
                insertion list else add after current playing track */
             if (playlist->last_insert_pos >= 0 &&
                 playlist->last_insert_pos < playlist->amount &&
-                (playlist->indices[playlist->last_insert_pos]&
+                (get_index_entry(playlist, playlist->last_insert_pos)&
                     PLAYLIST_INSERT_TYPE_MASK) == PLAYLIST_INSERT_TYPE_INSERT)
                 position = insert_position = playlist->last_insert_pos+1;
             else if (playlist->amount > 0)
@@ -1338,6 +1441,7 @@ static int add_track_to_playlist_unlocked(struct playlist_info* playlist,
             break;
         }
         case PLAYLIST_REPLACE:
+            insert_gap_close(playlist);
             if (remove_all_tracks_unlocked(playlist, true) < 0)
                 return -1;
             int newpos = playlist->index + 1;
@@ -1347,22 +1451,6 @@ static int add_track_to_playlist_unlocked(struct playlist_info* playlist,
 
     if (queue)
         flags |= PLAYLIST_QUEUED;
-
-#ifdef HAVE_DIRCACHE
-    struct dircache_fileref *dcfrefs = NULL;
-    if (playlist->dcfrefs_handle)
-        dcfrefs = core_get_data(playlist->dcfrefs_handle);
-#else
-    int *dcfrefs = NULL;
-#endif
-
-    /* shift indices so that track can be added */
-    for (i=playlist->amount; i>insert_position; i--)
-    {
-        playlist->indices[i] = playlist->indices[i-1];
-        if (dcfrefs)
-            dcfrefs[i] = dcfrefs[i-1];
-    }
 
     /* update stored indices if needed */
 
@@ -1412,6 +1500,9 @@ static int add_track_to_playlist_unlocked(struct playlist_info* playlist,
             return result;
     }
 
+    /* make room so that track can be added */
+    make_room_for_track(playlist, insert_position);
+
     playlist->indices[insert_position] = flags | seek_pos;
     dc_init_filerefs(playlist, insert_position, 1);
 
@@ -1435,27 +1526,14 @@ static int directory_search_callback(char* filename, void* context)
 static int remove_track_unlocked(struct playlist_info* playlist,
                                  int position, bool write)
 {
-    int i;
     int result = 0;
 
     if (playlist->amount <= 0)
         return -1;
 
-#ifdef HAVE_DIRCACHE
-    struct dircache_fileref *dcfrefs = NULL;
-    if (playlist->dcfrefs_handle)
-        dcfrefs = core_get_data(playlist->dcfrefs_handle);
-#else
-    int *dcfrefs = NULL;
-#endif
-
     /* shift indices now that track has been removed */
-    for (i=position; i<playlist->amount; i++)
-    {
-        playlist->indices[i] = playlist->indices[i+1];
-        if (dcfrefs)
-            dcfrefs[i] = dcfrefs[i+1];
-    }
+    move_indices(playlist, position, position + 1,
+                 playlist->amount - position - 1);
 
     playlist->amount--;
 
@@ -2177,6 +2255,54 @@ out:
  * Search specified directory for tracks and notify via callback.  May be
  * called recursively.
  */
+/*
+ * Copy the names of the subdirectories and audio files of the directory
+ * currently loaded in the tree cache, in order, packed as a type char
+ * ('d' or 'f') followed by the name. Recursing into a subdirectory reuses the
+ * tree cache, so without this copy the directory would have to be read and
+ * sorted again after every subdirectory. Returns a handle (> 0) or <= 0 if
+ * there was no memory, in which case the caller falls back to reloading.
+ */
+static int tracksearch_copy_entries(struct tree_context *tc, int *count)
+{
+    struct entry *files = core_get_data(tc->cache.entries_handle);
+    size_t size = 0;
+    int i, n = 0;
+
+    for (i = 0; i < tc->filesindir; i++)
+    {
+        if ((files[i].attr & ATTR_DIRECTORY) ||
+            (files[i].attr & FILE_ATTR_MASK) == FILE_ATTR_AUDIO)
+            size += strlen(files[i].name) + 2;
+    }
+
+    if (size == 0)
+        return 0;
+
+    int handle = core_alloc(size);
+    if (handle <= 0)
+        return handle;
+
+    char *p = core_get_data(handle);
+    files = core_get_data(tc->cache.entries_handle);
+    for (i = 0; i < tc->filesindir; i++)
+    {
+        if (files[i].attr & ATTR_DIRECTORY)
+            *p++ = 'd';
+        else if ((files[i].attr & FILE_ATTR_MASK) == FILE_ATTR_AUDIO)
+            *p++ = 'f';
+        else
+            continue;
+
+        strcpy(p, files[i].name);
+        p += strlen(p) + 1;
+        n++;
+    }
+
+    *count = n;
+    return handle;
+}
+
 int playlist_directory_tracksearch(const char* dirname, bool recurse,
                                    int (*callback)(char*, void*),
                                    void* context)
@@ -2184,7 +2310,9 @@ int playlist_directory_tracksearch(const char* dirname, bool recurse,
     char buf[MAX_PATH+1];
     int result = 0;
     int num_files = 0;
-    int i;;
+    int i;
+    int copy_handle = 0;
+    size_t copy_pos = 0;
     struct tree_context* tc = tree_get_context();
     struct tree_cache* cache = &tc->cache;
     int old_dirfilter = *(tc->dirfilter);
@@ -2208,8 +2336,18 @@ int playlist_directory_tracksearch(const char* dirname, bool recurse,
        reloaded */
     reload_directory();
 
+    if (recurse && tc->dirsindir > 0)
+    {
+        copy_handle = tracksearch_copy_entries(tc, &num_files);
+        if (copy_handle == 0)
+            num_files = 0;
+    }
+
     for (i=0; i<num_files; i++)
     {
+        const char *name;
+        bool is_dir, is_audio;
+
         /* user abort */
         if (action_userabort(TIMEOUT_NOBLOCK))
         {
@@ -2217,13 +2355,29 @@ int playlist_directory_tracksearch(const char* dirname, bool recurse,
             break;
         }
 
-        struct entry *files = core_get_data(cache->entries_handle);
-        if (files[i].attr & ATTR_DIRECTORY)
+        if (copy_handle > 0)
+        {
+            /* re-fetch every time, the buffer may move when yielding */
+            char *p = (char *)core_get_data(copy_handle) + copy_pos;
+            is_dir = (*p == 'd');
+            is_audio = !is_dir;
+            name = p + 1;
+            copy_pos += strlen(p) + 1;
+        }
+        else
+        {
+            struct entry *files = core_get_data(cache->entries_handle);
+            is_dir = files[i].attr & ATTR_DIRECTORY;
+            is_audio = (files[i].attr & FILE_ATTR_MASK) == FILE_ATTR_AUDIO;
+            name = files[i].name;
+        }
+
+        if (is_dir)
         {
             if (recurse)
             {
                 /* recursively add directories */
-                if (path_append(buf, dirname, files[i].name, sizeof(buf))
+                if (path_append(buf, dirname, name, sizeof(buf))
                         >= sizeof(buf))
                 {
                     continue;
@@ -2234,7 +2388,10 @@ int playlist_directory_tracksearch(const char* dirname, bool recurse,
                 if (result < 0)
                     break;
 
-                /* we now need to reload our current directory */
+                if (copy_handle > 0)
+                    continue;
+
+                /* no copy of the entries, reload our current directory */
                 if(ft_load(tc, dirname) < 0)
                 {
                     result = -1;
@@ -2251,9 +2408,9 @@ int playlist_directory_tracksearch(const char* dirname, bool recurse,
             else
                 continue;
         }
-        else if ((files[i].attr & FILE_ATTR_MASK) == FILE_ATTR_AUDIO)
+        else if (is_audio)
         {
-            if (path_append(buf, dirname, files[i].name, sizeof(buf))
+            if (path_append(buf, dirname, name, sizeof(buf))
                     >= sizeof(buf))
             {
                 continue;
@@ -2269,6 +2426,9 @@ int playlist_directory_tracksearch(const char* dirname, bool recurse,
             yield();
         }
     }
+
+    if (copy_handle > 0)
+        core_free(copy_handle);
 
     /* restore dirfilter */
     *(tc->dirfilter) = old_dirfilter;
@@ -2424,6 +2584,12 @@ int playlist_insert_context_create(struct playlist_info* playlist,
         }
     }
 
+    /* batch consecutive inserts, see insert_gap */
+    if (insert_gap.playlist)
+        insert_gap_close(insert_gap.playlist);
+    insert_gap.playlist = playlist;
+    insert_gap.len = 0;
+
     context->playlist = playlist;
     context->position = position;
     context->queue = queue;
@@ -2469,7 +2635,10 @@ int playlist_insert_context_add(struct playlist_insert_context *context,
         if ((c->count) == PLAYLIST_DISPLAY_COUNT &&
             (audio_status() & AUDIO_STATUS_PLAY) &&
             c->playlist->started)
+        {
+            insert_gap_close(c->playlist);
             audio_flush_and_reload_tracks();
+        }
     }
 
     return 0;
@@ -2482,6 +2651,9 @@ void playlist_insert_context_release(struct playlist_insert_context *context)
 {
 
     struct playlist_info* playlist = context->playlist;
+    insert_gap_close(playlist);
+    if (insert_gap.playlist == playlist)
+        insert_gap.playlist = NULL;
     if (context->initialized)
         sync_control_unlocked(playlist);
     if (context->progress)
