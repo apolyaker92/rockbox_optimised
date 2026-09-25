@@ -1229,20 +1229,15 @@ static int remove_all_tracks_unlocked(struct playlist_info *playlist, bool write
 }
 
 /*
- * Insert gap: while an insert context is adding tracks one after another at
- * consecutive positions (Insert, Insert next, Insert last with a rotated
- * playlist, ...) the tail of the index array is parked at the end of the
- * buffer, so each new track is placed in O(1) instead of shifting every
- * following entry. While the gap is open, logical entries [pos, amount) are
- * stored at [pos + len, amount + len). It must be closed before anything
- * else reads the indices; the insert context holds the playlist lock the
- * whole time.
+ * Gap buffer for batched inserts: while open, entries [pos, amount) are
+ * stored at [pos + len, amount + len) so consecutive inserts don't shift
+ * the tail. Must be closed before anything else reads the indices.
  */
 static struct
 {
-    struct playlist_info *playlist; /* batching enabled for this playlist */
-    int pos;                        /* logical position of the gap        */
-    int len;                        /* gap size in entries, 0 = closed    */
+    struct playlist_info *playlist;
+    int pos;
+    int len;
 } insert_gap;
 
 static void move_indices(struct playlist_info *playlist,
@@ -1282,7 +1277,21 @@ static void insert_gap_open(struct playlist_info *playlist, int pos)
     insert_gap.len = len;
 }
 
-/* read an index entry, accounting for an open insert gap */
+static void insert_gap_begin(struct playlist_info *playlist)
+{
+    if (insert_gap.playlist)
+        insert_gap_close(insert_gap.playlist);
+    insert_gap.playlist = playlist;
+    insert_gap.len = 0;
+}
+
+static void insert_gap_end(struct playlist_info *playlist)
+{
+    insert_gap_close(playlist);
+    if (insert_gap.playlist == playlist)
+        insert_gap.playlist = NULL;
+}
+
 static unsigned long get_index_entry(const struct playlist_info *playlist,
                                      int index)
 {
@@ -1293,10 +1302,6 @@ static unsigned long get_index_entry(const struct playlist_info *playlist,
     return playlist->indices[index];
 }
 
-/*
- * Make room for one entry at insert_position. Uses the insert gap when
- * batching is enabled for this playlist, otherwise shifts the tail.
- */
 static void make_room_for_track(struct playlist_info *playlist,
                                 int insert_position)
 {
@@ -1304,7 +1309,6 @@ static void make_room_for_track(struct playlist_info *playlist,
     {
         if (insert_gap.len > 0 && insert_gap.pos != insert_position)
         {
-            /* move the gap, only the entries in between need to move */
             if (insert_position < insert_gap.pos)
                 move_indices(playlist, insert_position + insert_gap.len,
                              insert_position, insert_gap.pos - insert_position);
@@ -1320,12 +1324,10 @@ static void make_room_for_track(struct playlist_info *playlist,
 
         if (insert_gap.len > 0)
         {
-            /* entry is written at insert_position, just shrink the gap */
             insert_gap.pos++;
             insert_gap.len--;
             return;
         }
-        /* appending at the end, nothing to move */
     }
 
     move_indices(playlist, insert_position + 1, insert_position,
@@ -1500,7 +1502,6 @@ static int add_track_to_playlist_unlocked(struct playlist_info* playlist,
             return result;
     }
 
-    /* make room so that track can be added */
     make_room_for_track(playlist, insert_position);
 
     playlist->indices[insert_position] = flags | seek_pos;
@@ -2256,12 +2257,9 @@ out:
  * called recursively.
  */
 /*
- * Copy the names of the subdirectories and audio files of the directory
- * currently loaded in the tree cache, in order, packed as a type char
- * ('d' or 'f') followed by the name. Recursing into a subdirectory reuses the
- * tree cache, so without this copy the directory would have to be read and
- * sorted again after every subdirectory. Returns a handle (> 0) or <= 0 if
- * there was no memory, in which case the caller falls back to reloading.
+ * Copy the dir and audio file names ('d'/'f' + name) out of the tree cache,
+ * which recursion overwrites, so the directory needn't be reloaded after
+ * each subdirectory. Returns <= 0 if there is no memory.
  */
 static int tracksearch_copy_entries(struct tree_context *tc, int *count)
 {
@@ -2391,7 +2389,7 @@ int playlist_directory_tracksearch(const char* dirname, bool recurse,
                 if (copy_handle > 0)
                     continue;
 
-                /* no copy of the entries, reload our current directory */
+                /* we now need to reload our current directory */
                 if(ft_load(tc, dirname) < 0)
                 {
                     result = -1;
@@ -2584,11 +2582,7 @@ int playlist_insert_context_create(struct playlist_info* playlist,
         }
     }
 
-    /* batch consecutive inserts, see insert_gap */
-    if (insert_gap.playlist)
-        insert_gap_close(insert_gap.playlist);
-    insert_gap.playlist = playlist;
-    insert_gap.len = 0;
+    insert_gap_begin(playlist);
 
     context->playlist = playlist;
     context->position = position;
@@ -2651,9 +2645,7 @@ void playlist_insert_context_release(struct playlist_insert_context *context)
 {
 
     struct playlist_info* playlist = context->playlist;
-    insert_gap_close(playlist);
-    if (insert_gap.playlist == playlist)
-        insert_gap.playlist = NULL;
+    insert_gap_end(playlist);
     if (context->initialized)
         sync_control_unlocked(playlist);
     if (context->progress)
@@ -3348,6 +3340,8 @@ int playlist_resume(void)
 
     empty_playlist_unlocked(playlist, true);
 
+    insert_gap_begin(playlist);
+
     if (!file_exists(playlist->control_filename))
         goto out;
 
@@ -3462,6 +3456,7 @@ int playlist_resume(void)
                             goto out;
                         }
 
+                        insert_gap_close(playlist);
                         update_playlist_filename_unlocked(playlist, strp[1], strp[2]);
 
                         if (strp[2][0] != '\0')
@@ -3525,6 +3520,7 @@ int playlist_resume(void)
 
                         position = atoi(strp[0]);
 
+                        insert_gap_close(playlist);
                         if (remove_track_unlocked(playlist, position, false) < 0)
                         {
                             result = -7;
@@ -3545,6 +3541,7 @@ int playlist_resume(void)
                             break;
                         }
 
+                        insert_gap_close(playlist);
                         if (!sorted)
                         {
                             /* Always sort list before shuffling */
@@ -3576,6 +3573,7 @@ int playlist_resume(void)
 
                         playlist->first_index = atoi(strp[0]);
 
+                        insert_gap_close(playlist);
                         if (sort_playlist_unlocked(playlist, false, false) < 0)
                         {
                             result = -11;
@@ -3711,6 +3709,7 @@ int playlist_resume(void)
         playlist->index = global_status.resume_index;
 
 out:
+    insert_gap_end(playlist);
     playlist_write_unlock(playlist);
     dc_thread_start(playlist, true);
 
