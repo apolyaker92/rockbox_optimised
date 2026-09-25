@@ -762,6 +762,10 @@ int skin_wait_for_action(enum skinnable_screens skin, int context, int timeout)
                         skin_update(skin, i, SKIN_REFRESH_PEAK_METER);
                     next_refresh += HZ / PEAK_METER_FPS;
                 }
+                /* if drawing is slower than the frame rate, don't try to
+                   catch up */
+                if (TIME_BEFORE(next_refresh, current_tick))
+                    next_refresh = current_tick + HZ / PEAK_METER_FPS;
             }
         }
 

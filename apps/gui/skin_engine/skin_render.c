@@ -84,6 +84,7 @@ static void skin_render_playlistviewer(struct playlistviewer* viewer,
                                        unsigned long refresh_type);
 
 static char* skin_buffer;
+static bool peak_meter_drawn;
 
 static inline struct skin_element*
 get_child(OFFSETTYPE(struct skin_element**) children, int child)
@@ -189,7 +190,10 @@ static bool do_non_text_tags(struct gui_wps *gwps, struct skin_draw_info *info,
         case SKIN_TOKEN_PEAKMETER:
             data->peak_meter_enabled = true;
             if (do_refresh)
+            {
                 draw_peakmeters(gwps, info->line_number, &skin_vp->vp);
+                peak_meter_drawn = true;
+            }
             break;
         case SKIN_TOKEN_DRAWRECTANGLE:
             if (do_refresh)
@@ -222,6 +226,8 @@ static bool do_non_text_tags(struct gui_wps *gwps, struct skin_draw_info *info,
         case SKIN_TOKEN_PEAKMETER_LEFTBAR:
         case SKIN_TOKEN_PEAKMETER_RIGHTBAR:
             data->peak_meter_enabled = true;
+            if (do_refresh)
+                peak_meter_drawn = true;
             /* fall through to the progressbar code */
         case SKIN_TOKEN_VOLUMEBAR:
         case SKIN_TOKEN_BATTERY_PERCENTBAR:
@@ -918,9 +924,13 @@ void skin_render(struct gui_wps *gwps, unsigned refresh_mode)
             display->clear_viewport();
         }
         /* render */
+        peak_meter_drawn = false;
         if (viewport->children_count)
             skin_render_viewport(get_child(viewport->children, 0), gwps,
                                  skin_viewport, vp_refresh_mode);
+        /* peak meter only refreshes push just their own viewports */
+        if (vp_refresh_mode == SKIN_REFRESH_PEAK_METER && peak_meter_drawn)
+            display->update_viewport();
         refresh_mode = old_refresh_mode;
     }
 #if (LCD_DEPTH > 1) || (defined(HAVE_REMOTE_LCD) && (LCD_REMOTE_DEPTH > 1))
@@ -936,7 +946,9 @@ void skin_render(struct gui_wps *gwps, unsigned refresh_mode)
     }
     /* Restore the default viewport */
     display->set_viewport_ex(NULL, VP_FLAG_VP_SET_CLEAN);
-    display->update();
+    /* peak meter only refreshes already updated their viewports */
+    if (old_refresh_mode != SKIN_REFRESH_PEAK_METER)
+        display->update();
 }
 
 static __attribute__((noinline))
