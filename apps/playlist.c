@@ -1666,6 +1666,51 @@ static int sort_compare_fn(const void* p1, const void* p2)
         return *e1 - *e2;
 }
 
+/* sort indices and dircache filerefs together so the filerefs stay valid */
+static bool sort_with_filerefs(struct playlist_info* playlist)
+{
+#ifdef HAVE_DIRCACHE
+    struct sort_entry
+    {
+        unsigned long index; /* first, sort_compare_fn() reads it */
+        struct dircache_fileref ref;
+    };
+
+    if (!playlist->dcfrefs_handle)
+        return false;
+
+    int handle = core_alloc(playlist->amount * sizeof(struct sort_entry));
+    if (handle <= 0)
+        return false;
+
+    struct sort_entry *entries = core_get_data_pinned(handle);
+    struct dircache_fileref *dcfrefs =
+        core_get_data_pinned(playlist->dcfrefs_handle);
+
+    for (int i = 0; i < playlist->amount; i++)
+    {
+        entries[i].index = playlist->indices[i];
+        entries[i].ref = dcfrefs[i];
+    }
+
+    qsort(entries, playlist->amount, sizeof(*entries), sort_compare_fn);
+
+    for (int i = 0; i < playlist->amount; i++)
+    {
+        playlist->indices[i] = entries[i].index;
+        dcfrefs[i] = entries[i].ref;
+    }
+
+    core_put_data_pinned(dcfrefs);
+    core_put_data_pinned(entries);
+    core_free(handle);
+    return true;
+#else
+    (void)playlist;
+    return false;
+#endif
+}
+
 /*
  * Sort the array of indices for the playlist. If start_current is true then
  * set the index to the new index of the current song.
@@ -1676,16 +1721,15 @@ static int sort_playlist_unlocked(struct playlist_info* playlist,
 {
     unsigned long current = playlist->indices[playlist->index];
 
-    if (playlist->amount > 0)
+    if (playlist->amount > 0 && !sort_with_filerefs(playlist))
+    {
         qsort((void*)playlist->indices, playlist->amount,
             sizeof(playlist->indices[0]), sort_compare_fn);
-
 #ifdef HAVE_DIRCACHE
-    /** We need to re-check the song names from disk because qsort can't
-     * sort two arrays at once :/
-     * FIXME: Please implement a better way to do this. */
-    dc_init_filerefs(playlist, 0, playlist->max_playlist_size);
+        /* no memory to sort the filerefs along, re-check them from disk */
+        dc_init_filerefs(playlist, 0, playlist->max_playlist_size);
 #endif
+    }
 
     if (start_current)
         find_and_set_playlist_index_unlocked(playlist, current);
