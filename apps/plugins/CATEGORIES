@@ -57,6 +57,7 @@ keyremap,apps
 lamp,apps
 lastfm_scrobbler,apps
 lastfm_scrobbler_viewer,viewers
+listen_stats,apps
 logo,demos
 lrcplayer,apps
 lua,viewers
