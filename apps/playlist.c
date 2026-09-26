@@ -1670,44 +1670,144 @@ static int sort_compare_fn(const void* p1, const void* p2)
         return *e1 - *e2;
 }
 
+#ifdef HAVE_DIRCACHE
+/*
+ * qsort() from firmware/libc/qsort.c working on positions, applying every
+ * swap to the indices and the dircache filerefs alike. It makes the same
+ * comparisons and swaps as qsort(), so the resulting order is identical,
+ * and it needs no memory: allocating here could stop and wait for playback,
+ * which may itself be waiting for the playlist lock we hold.
+ */
+static unsigned long *pq_indices;
+static struct dircache_fileref *pq_refs;
+
+static inline int pq_cmp(int a, int b)
+{
+    return sort_compare_fn(&pq_indices[a], &pq_indices[b]);
+}
+
+static void pq_swap(int a, int b)
+{
+    unsigned long index = pq_indices[a];
+    pq_indices[a] = pq_indices[b];
+    pq_indices[b] = index;
+
+    struct dircache_fileref ref = pq_refs[a];
+    pq_refs[a] = pq_refs[b];
+    pq_refs[b] = ref;
+}
+
+static void pq_vecswap(int a, int b, int n)
+{
+    while (n-- > 0)
+        pq_swap(a++, b++);
+}
+
+static int pq_med3(int a, int b, int c)
+{
+    return pq_cmp(a, b) < 0 ?
+           (pq_cmp(b, c) < 0 ? b : (pq_cmp(a, c) < 0 ? c : a))
+          :(pq_cmp(b, c) > 0 ? b : (pq_cmp(a, c) < 0 ? a : c));
+}
+
+static void pq_insertion_sort(int a, int n)
+{
+    for (int pm = a + 1; pm < a + n; pm++)
+        for (int pl = pm; pl > a && pq_cmp(pl - 1, pl) > 0; pl--)
+            pq_swap(pl, pl - 1);
+}
+
+static void pq_sort(int a, int n)
+{
+    int pa, pb, pc, pd, pl, pm, pn, d, r, swap_cnt;
+
+loop:
+    swap_cnt = 0;
+    if (n < 7)
+    {
+        pq_insertion_sort(a, n);
+        return;
+    }
+    pm = a + n / 2;
+    if (n > 7)
+    {
+        pl = a;
+        pn = a + n - 1;
+        if (n > 40)
+        {
+            d = n / 8;
+            pl = pq_med3(pl, pl + d, pl + 2 * d);
+            pm = pq_med3(pm - d, pm, pm + d);
+            pn = pq_med3(pn - 2 * d, pn - d, pn);
+        }
+        pm = pq_med3(pl, pm, pn);
+    }
+    pq_swap(a, pm);
+    pa = pb = a + 1;
+
+    pc = pd = a + n - 1;
+    for (;;)
+    {
+        while (pb <= pc && (r = pq_cmp(pb, a)) <= 0)
+        {
+            if (r == 0)
+            {
+                swap_cnt = 1;
+                pq_swap(pa, pb);
+                pa++;
+            }
+            pb++;
+        }
+        while (pb <= pc && (r = pq_cmp(pc, a)) >= 0)
+        {
+            if (r == 0)
+            {
+                swap_cnt = 1;
+                pq_swap(pc, pd);
+                pd--;
+            }
+            pc--;
+        }
+        if (pb > pc)
+            break;
+        pq_swap(pb, pc);
+        swap_cnt = 1;
+        pb++;
+        pc--;
+    }
+    if (swap_cnt == 0)
+    {
+        pq_insertion_sort(a, n);
+        return;
+    }
+
+    pn = a + n;
+    r = MIN(pa - a, pb - pa);
+    pq_vecswap(a, pb - r, r);
+    r = MIN(pd - pc, pn - pd - 1);
+    pq_vecswap(pb, pn - r, r);
+    if ((r = pb - pa) > 1)
+        pq_sort(a, r);
+    if ((r = pd - pc) > 1)
+    {
+        a = pn - r;
+        n = r;
+        goto loop;
+    }
+}
+#endif
+
 /* sort indices and dircache filerefs together so the filerefs stay valid */
 static bool sort_with_filerefs(struct playlist_info* playlist)
 {
 #ifdef HAVE_DIRCACHE
-    struct sort_entry
-    {
-        unsigned long index; /* first, sort_compare_fn() reads it */
-        struct dircache_fileref ref;
-    };
-
     if (!playlist->dcfrefs_handle)
         return false;
 
-    int handle = core_alloc(playlist->amount * sizeof(struct sort_entry));
-    if (handle <= 0)
-        return false;
-
-    struct sort_entry *entries = core_get_data_pinned(handle);
-    struct dircache_fileref *dcfrefs =
-        core_get_data_pinned(playlist->dcfrefs_handle);
-
-    for (int i = 0; i < playlist->amount; i++)
-    {
-        entries[i].index = playlist->indices[i];
-        entries[i].ref = dcfrefs[i];
-    }
-
-    qsort(entries, playlist->amount, sizeof(*entries), sort_compare_fn);
-
-    for (int i = 0; i < playlist->amount; i++)
-    {
-        playlist->indices[i] = entries[i].index;
-        dcfrefs[i] = entries[i].ref;
-    }
-
-    core_put_data_pinned(dcfrefs);
-    core_put_data_pinned(entries);
-    core_free(handle);
+    pq_indices = playlist->indices;
+    pq_refs = core_get_data_pinned(playlist->dcfrefs_handle);
+    pq_sort(0, playlist->amount);
+    core_put_data_pinned(pq_refs);
     return true;
 #else
     (void)playlist;
@@ -1730,7 +1830,7 @@ static int sort_playlist_unlocked(struct playlist_info* playlist,
         qsort((void*)playlist->indices, playlist->amount,
             sizeof(playlist->indices[0]), sort_compare_fn);
 #ifdef HAVE_DIRCACHE
-        /* no memory to sort the filerefs along, re-check them from disk */
+        /* no filerefs were sorted along, re-check them from disk */
         dc_init_filerefs(playlist, 0, playlist->max_playlist_size);
 #endif
     }
@@ -2301,15 +2401,19 @@ out:
 }
 
 /*
- * Search specified directory for tracks and notify via callback.  May be
- * called recursively.
+ * Names of the directories being searched, stacked by recursion level, so a
+ * directory needn't be reloaded and re-sorted after each subdirectory. This
+ * is static because allocating while the playlist is locked can stop and
+ * wait for playback, which may itself be waiting for the playlist.
  */
+static char tracksearch_names[64*1024];
+static size_t tracksearch_names_used;
+
 /*
  * Copy the dir and audio file names ('d'/'f' + name) out of the tree cache,
- * which recursion overwrites, so the directory needn't be reloaded after
- * each subdirectory. Returns <= 0 if there is no memory.
+ * which recursion overwrites. Returns false if they don't fit.
  */
-static int tracksearch_copy_entries(struct tree_context *tc, int *count)
+static bool tracksearch_copy_entries(struct tree_context *tc, int *count)
 {
     struct entry *files = core_get_data(tc->cache.entries_handle);
     size_t size = 0;
@@ -2322,15 +2426,10 @@ static int tracksearch_copy_entries(struct tree_context *tc, int *count)
             size += strlen(files[i].name) + 2;
     }
 
-    if (size == 0)
-        return 0;
+    if (size > sizeof(tracksearch_names) - tracksearch_names_used)
+        return false;
 
-    int handle = core_alloc(size);
-    if (handle <= 0)
-        return handle;
-
-    char *p = core_get_data(handle);
-    files = core_get_data(tc->cache.entries_handle);
+    char *p = &tracksearch_names[tracksearch_names_used];
     for (i = 0; i < tc->filesindir; i++)
     {
         if (files[i].attr & ATTR_DIRECTORY)
@@ -2345,10 +2444,15 @@ static int tracksearch_copy_entries(struct tree_context *tc, int *count)
         n++;
     }
 
+    tracksearch_names_used += size;
     *count = n;
-    return handle;
+    return true;
 }
 
+/*
+ * Search specified directory for tracks and notify via callback.  May be
+ * called recursively.
+ */
 int playlist_directory_tracksearch(const char* dirname, bool recurse,
                                    int (*callback)(char*, void*),
                                    void* context)
@@ -2357,8 +2461,9 @@ int playlist_directory_tracksearch(const char* dirname, bool recurse,
     int result = 0;
     int num_files = 0;
     int i;
-    int copy_handle = 0;
-    size_t copy_pos = 0;
+    bool copied = false;
+    size_t copy_start = tracksearch_names_used;
+    size_t copy_pos = copy_start;
     struct tree_context* tc = tree_get_context();
     struct tree_cache* cache = &tc->cache;
     int old_dirfilter = *(tc->dirfilter);
@@ -2383,11 +2488,7 @@ int playlist_directory_tracksearch(const char* dirname, bool recurse,
     reload_directory();
 
     if (recurse && tc->dirsindir > 0)
-    {
-        copy_handle = tracksearch_copy_entries(tc, &num_files);
-        if (copy_handle == 0)
-            num_files = 0;
-    }
+        copied = tracksearch_copy_entries(tc, &num_files);
 
     for (i=0; i<num_files; i++)
     {
@@ -2397,14 +2498,13 @@ int playlist_directory_tracksearch(const char* dirname, bool recurse,
         /* user abort */
         if (action_userabort(TIMEOUT_NOBLOCK))
         {
-            result = -1;
+            result = -2;
             break;
         }
 
-        if (copy_handle > 0)
+        if (copied)
         {
-            /* re-fetch every time, the buffer may move when yielding */
-            char *p = (char *)core_get_data(copy_handle) + copy_pos;
+            const char *p = &tracksearch_names[copy_pos];
             is_dir = (*p == 'd');
             is_audio = !is_dir;
             name = p + 1;
@@ -2434,7 +2534,7 @@ int playlist_directory_tracksearch(const char* dirname, bool recurse,
                 if (result < 0)
                     break;
 
-                if (copy_handle > 0)
+                if (copied)
                     continue;
 
                 /* we now need to reload our current directory */
@@ -2473,8 +2573,7 @@ int playlist_directory_tracksearch(const char* dirname, bool recurse,
         }
     }
 
-    if (copy_handle > 0)
-        core_free(copy_handle);
+    tracksearch_names_used = copy_start;
 
     /* restore dirfilter */
     *(tc->dirfilter) = old_dirfilter;
