@@ -714,11 +714,28 @@ static int exit_to_new_screen(int screen)
 #ifdef HAVE_HOTKEY
 #define FIRST_LETTERS_MAX 128
 
+enum first_letter_script
+{
+    SCRIPT_LATIN, SCRIPT_CYRILLIC, SCRIPT_JAPANESE, SCRIPT_KOREAN,
+    SCRIPT_OTHER, SCRIPT_COUNT
+};
+
+static const char * const script_titles[SCRIPT_COUNT] =
+{
+    "Latin (Menu: switch)", "Cyrillic (Menu: switch)",
+    "Japanese (Menu: switch)", "Korean (Menu: switch)",
+    "Other (Menu: switch)",
+};
+
 static struct
 {
     unsigned short ch[FIRST_LETTERS_MAX];
     int index[FIRST_LETTERS_MAX]; /* first entry starting with ch */
+    unsigned char script[FIRST_LETTERS_MAX];
     int count;
+    int shown[FIRST_LETTERS_MAX]; /* letters of the current script */
+    int shown_count;
+    int current;                  /* current script */
 } first_letters;
 
 /* first character of a name, with Latin and Cyrillic letters uppercased */
@@ -739,6 +756,31 @@ static unsigned short name_first_letter(const char *name)
     return ch;
 }
 
+static int letter_script(unsigned short ch)
+{
+    if (ch < 0x370 || (ch >= 0x1e00 && ch < 0x1f00))
+        return SCRIPT_LATIN;           /* includes digits and symbols */
+    if (ch >= 0x400 && ch < 0x530)
+        return SCRIPT_CYRILLIC;
+    if ((ch >= 0x3040 && ch < 0x3100) || (ch >= 0x3400 && ch < 0xa000))
+        return SCRIPT_JAPANESE;        /* kana and kanji */
+    if ((ch >= 0xac00 && ch < 0xd7b0) || (ch >= 0x1100 && ch < 0x1200) ||
+        (ch >= 0x3130 && ch < 0x3190))
+        return SCRIPT_KOREAN;
+    return SCRIPT_OTHER;
+}
+
+static void show_script(int script)
+{
+    first_letters.current = script;
+    first_letters.shown_count = 0;
+    for (int i = 0; i < first_letters.count; i++)
+    {
+        if (first_letters.script[i] == script)
+            first_letters.shown[first_letters.shown_count++] = i;
+    }
+}
+
 static const char *first_letter_get_name(int selected_item, void *data,
                                          char *buffer, size_t buffer_len)
 {
@@ -746,10 +788,39 @@ static const char *first_letter_get_name(int selected_item, void *data,
     if (buffer_len < 8)
         return "";
 
-    unsigned char *end = utf8encode(first_letters.ch[selected_item],
+    int i = first_letters.shown[selected_item];
+    unsigned char *end = utf8encode(first_letters.ch[i],
                                     (unsigned char *)buffer);
     *end = '\0';
     return buffer;
+}
+
+static bool script_present(int script)
+{
+    for (int i = 0; i < first_letters.count; i++)
+    {
+        if (first_letters.script[i] == script)
+            return true;
+    }
+    return false;
+}
+
+/* Menu switches to the next script present in the directory */
+static int first_letter_action(int action, struct gui_synclist *lists)
+{
+    if (action != ACTION_STD_MENU)
+        return action;
+
+    int script = first_letters.current;
+    do
+        script = (script + 1) % SCRIPT_COUNT;
+    while (!script_present(script));
+
+    show_script(script);
+    gui_synclist_set_title(lists, (char *)script_titles[script], Icon_NOICON);
+    gui_synclist_set_nb_items(lists, first_letters.shown_count);
+    gui_synclist_select_item(lists, 0);
+    return ACTION_REDRAW;
 }
 
 /* let the user pick one of the first characters of the entries in this
@@ -776,6 +847,7 @@ static void jump_to_first_letter(void)
         {
             first_letters.ch[j] = ch;
             first_letters.index[j] = i;
+            first_letters.script[j] = letter_script(ch);
             first_letters.count++;
         }
     }
@@ -784,25 +856,31 @@ static void jump_to_first_letter(void)
     if (first_letters.count == 0)
         return;
 
-    simplelist_info_init(&info, str(LANG_SHOW_BY_FIRST_LETTER),
-                         first_letters.count, NULL);
+    /* start with Latin, or the first script there is */
+    int script = script_present(SCRIPT_LATIN) ? SCRIPT_LATIN
+                                              : first_letters.script[0];
+    show_script(script);
+
+    simplelist_info_init(&info, (char *)script_titles[script],
+                         first_letters.shown_count, NULL);
     info.get_name = first_letter_get_name;
+    info.action_callback = first_letter_action;
 
     /* start at the letter of the current selection */
     unsigned short current = name_first_letter(
         tree_get_entry_at(&tc, tc.selected_item)->name);
     info.selection = 0;
-    for (j = 0; j < first_letters.count; j++)
+    for (j = 0; j < first_letters.shown_count; j++)
     {
-        if (first_letters.ch[j] == current)
+        if (first_letters.ch[first_letters.shown[j]] == current)
             info.selection = j;
     }
 
     simplelist_show_list(&info);
 
-    if (info.selection >= 0)
+    if (info.selection >= 0 && info.selection < first_letters.shown_count)
     {
-        tc.selected_item = first_letters.index[info.selection];
+        tc.selected_item = first_letters.index[first_letters.shown[info.selection]];
         gui_synclist_select_item(&tree_lists, tc.selected_item);
     }
 }
