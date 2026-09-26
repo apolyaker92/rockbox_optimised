@@ -70,6 +70,7 @@
 
 /* gui api */
 #include "list.h"
+#include "rbunicode.h"
 #include "splash.h"
 #include "quickscreen.h"
 #include "shortcuts.h"
@@ -710,6 +711,103 @@ static int exit_to_new_screen(int screen)
 }
 
 /* main loop, handles key events */
+#ifdef HAVE_HOTKEY
+#define FIRST_LETTERS_MAX 128
+
+static struct
+{
+    unsigned short ch[FIRST_LETTERS_MAX];
+    int index[FIRST_LETTERS_MAX]; /* first entry starting with ch */
+    int count;
+} first_letters;
+
+/* first character of a name, with Latin and Cyrillic letters uppercased */
+static unsigned short name_first_letter(const char *name)
+{
+    unsigned short ch;
+    utf8decode((const unsigned char *)name, &ch);
+
+    if (ch >= 'a' && ch <= 'z')
+        ch -= 'a' - 'A';
+    else if (ch >= 0xe0 && ch <= 0xfe && ch != 0xf7)  /* Latin-1 */
+        ch -= 0x20;
+    else if (ch >= 0x430 && ch <= 0x44f)              /* Cyrillic */
+        ch -= 0x20;
+    else if (ch >= 0x450 && ch <= 0x45f)
+        ch -= 0x50;
+
+    return ch;
+}
+
+static const char *first_letter_get_name(int selected_item, void *data,
+                                         char *buffer, size_t buffer_len)
+{
+    (void)data;
+    if (buffer_len < 8)
+        return "";
+
+    unsigned char *end = utf8encode(first_letters.ch[selected_item],
+                                    (unsigned char *)buffer);
+    *end = '\0';
+    return buffer;
+}
+
+/* let the user pick one of the first characters of the entries in this
+   directory and select the first entry starting with it */
+static void jump_to_first_letter(void)
+{
+    struct simplelist_info info;
+    int i, j;
+
+    first_letters.count = 0;
+
+    tree_lock_cache(&tc);
+    struct entry *entries = tree_get_entries(&tc);
+    for (i = 0; i < tc.filesindir; i++)
+    {
+        unsigned short ch = name_first_letter(entries[i].name);
+
+        for (j = 0; j < first_letters.count; j++)
+        {
+            if (first_letters.ch[j] == ch)
+                break;
+        }
+        if (j == first_letters.count && j < FIRST_LETTERS_MAX)
+        {
+            first_letters.ch[j] = ch;
+            first_letters.index[j] = i;
+            first_letters.count++;
+        }
+    }
+    tree_unlock_cache(&tc);
+
+    if (first_letters.count == 0)
+        return;
+
+    simplelist_info_init(&info, str(LANG_SHOW_BY_FIRST_LETTER),
+                         first_letters.count, NULL);
+    info.get_name = first_letter_get_name;
+
+    /* start at the letter of the current selection */
+    unsigned short current = name_first_letter(
+        tree_get_entry_at(&tc, tc.selected_item)->name);
+    info.selection = 0;
+    for (j = 0; j < first_letters.count; j++)
+    {
+        if (first_letters.ch[j] == current)
+            info.selection = j;
+    }
+
+    simplelist_show_list(&info);
+
+    if (info.selection >= 0)
+    {
+        tc.selected_item = first_letters.index[info.selection];
+        gui_synclist_select_item(&tree_lists, tc.selected_item);
+    }
+}
+#endif /* HAVE_HOTKEY */
+
 static int dirbrowse(void)
 {
     int numentries=0;
@@ -899,6 +997,16 @@ static int dirbrowse(void)
             case ACTION_TREE_HOTKEY:
                 if (!global_settings.hotkey_tree)
                     break;
+                if (global_settings.hotkey_tree == HOTKEY_FIRST_LETTER)
+                {
+#ifdef HAVE_TAGCACHE
+                    if (!id3db)
+#endif
+                    if (numentries)
+                        jump_to_first_letter();
+                    restore = true;
+                    break;
+                }
                 /* fall through */
 #endif
             case ACTION_STD_CONTEXT:
