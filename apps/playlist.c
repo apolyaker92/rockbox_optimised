@@ -1451,6 +1451,10 @@ static int add_track_to_playlist_unlocked(struct playlist_info* playlist,
             break;
     }
 
+    /* a corrupt control file can ask for positions outside the playlist */
+    if (insert_position < 0 || insert_position > playlist->amount)
+        return -1;
+
     if (queue)
         flags |= PLAYLIST_QUEUED;
 
@@ -1529,7 +1533,7 @@ static int remove_track_unlocked(struct playlist_info* playlist,
 {
     int result = 0;
 
-    if (playlist->amount <= 0)
+    if (position < 0 || position >= playlist->amount)
         return -1;
 
     /* shift indices now that track has been removed */
