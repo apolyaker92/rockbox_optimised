@@ -1,8 +1,8 @@
-# Testing the playlist performance changes on an iPod Video (5th gen)
+# Testing this build on an iPod Video (5th gen)
 
-This branch is Rockbox 4.0 (the stable release) plus these changes only.
+This branch is Rockbox 4.0 (the stable release) plus the changes below. See README.md for an overview.
 
-The changes in this repo speed up:
+The performance changes speed up:
 
 1. Inserting tracks into a large playlist (Insert, Insert next, Insert last while shuffled, Insert shuffled)
 2. Playing or inserting a folder that has lots of subfolders (with recursive insert enabled)
@@ -30,6 +30,13 @@ The simulator can't exercise the directory cache, so this device test is the onl
 | C | Resume at power-on | After test A, power off by holding Play. Power on and time from the Rockbox logo until music resumes. |
 | D | Shuffle off | While playing a big playlist with shuffle on, turn shuffle off. It must not freeze (an earlier version on the development code did). Note how long the disk / CPU stays busy afterwards. |
 | E | VU meter | On the playing screen with music playing, change the volume up and down for 10 seconds. Note how responsive it feels compared to stock. |
+
+## New features
+
+| # | Feature | How to test it |
+|---|---------|----------------|
+| F | Jump to first letter | Settings > General Settings > Hotkey > File Browser > By First Letter... Then in the file browser press Select+Play. The list starts with Latin letters (and digits) found in the folder; Menu switches to Cyrillic, Japanese, Korean. Pick a letter and check the browser jumps to the first entry with it. Left closes it without jumping. |
+| G | Listening Stats | Plugins > Applications > listen_stats. The first time it offers to turn on playback logging. Play some tracks all the way (or at least half), then open it again: Top Tracks/Albums/Artists, Recently Played and Summary should match what you played. "Save Most Played Playlist" writes /Playlists/Most Played.m3u8 and can start it. |
 
 ## Check that nothing broke
 
