@@ -35,7 +35,7 @@ The simulator can't exercise the directory cache, so this device test is the onl
 
 | # | Feature | How to test it |
 |---|---------|----------------|
-| F | Jump to first letter | In the file browser hold Select on any entry and choose "By First Letter..." (or set Settings > General Settings > File View > Hotkey to "By First Letter..." and press Select+Play). The list starts with Latin letters (and digits) found in the folder; Menu switches to Cyrillic, Japanese, Korean. Pick a letter and check the browser jumps to the first entry with it. Left closes it without jumping. |
+| F | Jump to first letter | In the file browser hold Select on any entry and choose "By First Letter..." (or set Settings > General Settings > File View > File Browser Hotkey (last item) to "By First Letter..." and press Select+Play). The list starts with Latin letters (and digits) found in the folder; Menu switches to Cyrillic, Japanese, Korean. Pick a letter and check the browser jumps to the first entry with it. Left closes it without jumping. |
 | G | Listening Stats | Plugins > Applications > listen_stats. The first time it offers to turn on playback logging. Play some tracks all the way (or at least half), then open it again: Top Tracks/Albums/Artists, Recently Played and Summary should match what you played. "Save Most Played Playlist" writes /Playlists/Most Played.m3u8 and can start it. |
 
 ## Check that nothing broke

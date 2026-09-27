@@ -24,7 +24,7 @@ Performance and fixes:
 
 Features:
 
-- **Jump to first letter** in the file browser: hold Select and choose "By First Letter...", or set it as the File View hotkey (Select+Play). One script at a time: Latin, then Cyrillic, Japanese, Korean with Menu.
+- **Jump to first letter** in the file browser: hold Select and choose "By First Letter...", or set Settings > General Settings > File View > File Browser Hotkey (last item) to it and press Select+Play. One script at a time: Latin, then Cyrillic, Japanese, Korean with Menu.
 - **Listening Stats** plugin: top tracks, albums and artists, recently played, a summary, and a "Most Played" playlist, from the playback log.
 
 Tools:
