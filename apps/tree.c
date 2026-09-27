@@ -711,7 +711,6 @@ static int exit_to_new_screen(int screen)
 }
 
 /* main loop, handles key events */
-#ifdef HAVE_HOTKEY
 #define FIRST_LETTERS_MAX 128
 
 enum first_letter_script
@@ -825,7 +824,7 @@ static int first_letter_action(int action, struct gui_synclist *lists)
 
 /* let the user pick one of the first characters of the entries in this
    directory and select the first entry starting with it */
-static void jump_to_first_letter(void)
+void tree_jump_to_first_letter(void)
 {
     struct simplelist_info info;
     int i, j;
@@ -853,7 +852,7 @@ static void jump_to_first_letter(void)
     }
     tree_unlock_cache(&tc);
 
-    if (first_letters.count == 0)
+    if (first_letters.count == 0 || tc.selected_item >= tc.filesindir)
         return;
 
     /* start with Latin, or the first script there is */
@@ -884,7 +883,6 @@ static void jump_to_first_letter(void)
         gui_synclist_select_item(&tree_lists, tc.selected_item);
     }
 }
-#endif /* HAVE_HOTKEY */
 
 static int dirbrowse(void)
 {
@@ -1081,7 +1079,7 @@ static int dirbrowse(void)
                     if (!id3db)
 #endif
                     if (numentries)
-                        jump_to_first_letter();
+                        tree_jump_to_first_letter();
                     restore = true;
                     break;
                 }

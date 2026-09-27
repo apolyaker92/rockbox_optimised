@@ -827,6 +827,27 @@ MENUITEM_FUNCTION(delete_dir_item, 0, ID2P(LANG_DELETE_DIR),
 MENUITEM_FUNCTION(create_dir_item, 0, ID2P(LANG_CREATE_DIR),
                   clipboard_create_dir, clipboard_callback, Icon_NOICON);
 
+static int first_letter_jump(void)
+{
+    tree_jump_to_first_letter();
+    return 0;
+}
+
+static int first_letter_callback(int action,
+                                 const struct menu_item_ex *this_item,
+                                 struct gui_synclist *this_list)
+{
+    (void)this_item;
+    (void)this_list;
+    /* file browser only, the database has its own first letter menus */
+    if (action == ACTION_REQUEST_MENUITEM &&
+        (selected_file.context != CONTEXT_TREE || !selected_file.path))
+        return ACTION_EXIT_MENUITEM;
+    return action;
+}
+MENUITEM_FUNCTION(first_letter_item, 0, ID2P(LANG_SHOW_BY_FIRST_LETTER),
+                  first_letter_jump, first_letter_callback, Icon_NOICON);
+
 /* other items */
 static bool list_viewers(void)
 {
@@ -1116,6 +1137,7 @@ MENUITEM_FUNCTION(view_playlist_item, 0, ID2P(LANG_VIEW),
 MAKE_ONPLAYMENU( tree_onplay_menu, ID2P(LANG_ONPLAY_MENU_TITLE),
            onplaymenu_callback, Icon_file_view_menu,
            &view_playlist_item, &tree_playlist_menu, &cat_playlist_menu,
+           &first_letter_item,
            &rename_file_item, &clipboard_cut_item, &clipboard_copy_item,
            &clipboard_paste_item, &delete_file_item, &delete_dir_item,
            &list_viewers_item, &create_dir_item, &properties_item, &track_info_item,

@@ -110,6 +110,7 @@ struct entry* tree_get_entries(struct tree_context *t);
 struct entry* tree_get_entry_at(struct tree_context *t, int index);
 
 void tree_mem_init(void) INIT_ATTR;
+void tree_jump_to_first_letter(void);
 void tree_init(void) INIT_ATTR;
 char* get_current_file(char* buffer, size_t buffer_len);
 void set_dirfilter(int l_dirfilter);
