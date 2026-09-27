@@ -1,56 +1,73 @@
-# Rockbox optimised (iPod Video)
+# Rockbox for big libraries (iPod Video)
 
-Personal Rockbox build for an iPod Video (5th gen) with a 1 TB iFlash card and a large library: speed fixes for big playlists and big folder trees, plus two features.
+[Rockbox](https://www.rockbox.org) 4.0 with fixes for a large music library on an iPod Video (5th gen), plus two features. Built and tested on my own iPod: a 1 TB iFlash card, a big folder-based library, large playlists, and no database.
 
-## Which branch to use
+The write-up, with what was slow, why, and what went wrong along the way: [Making Rockbox fast on a 1 TB iPod](https://andrewpolyakov.com/blog/speeding-up-rockbox).
 
-| Branch | What it is |
-|---|---|
-| **`stable-4.0`** | **Use this one.** Rockbox 4.0 (the stable release) plus the changes below. |
-| `master` | The same fixes on the Rockbox development version of 25 Sep 2026. Not recommended: that development version had USB and disk problems of its own. |
-| `perf-logging` | `master` plus timing logs used while measuring. For testing only. |
-| `my-rockbox-config` | Backup of the iPod's `.rockbox` folder (themes, fonts, settings). |
+This is a personal fork, not an official Rockbox build.
 
-## Changes in `stable-4.0`
+## What's different
 
-Performance and fixes:
+Speed:
 
-- **Inserting into a large playlist** (Insert, Insert next, Insert shuffled, Insert last while shuffled) no longer shifts the whole playlist for every track.
+- **Inserting into a large playlist** (Insert, Insert next, Insert shuffled, Insert last while shuffled) no longer shifts the whole playlist for every track added.
 - **Playing or inserting a folder tree** no longer re-reads and re-sorts each parent folder after every subfolder.
 - **Resuming a large playlist** at power-on batches the replayed inserts the same way.
-- **Turning shuffle off** keeps the directory cache references instead of making the iPod find every track again, without allocating memory (an earlier version froze the iPod doing that).
-- **VU meter on the playing screen** only sends the meter area to the display each frame, and slow frames no longer pile up.
-- **Corrupt resume files** can no longer make the playlist code write outside its buffer.
+- **Turning shuffle off** keeps each track's directory cache entry instead of making the iPod find every track again.
+- **The VU meter on the playing screen** only sends the meter to the display each frame, and slow frames no longer pile up.
+
+Measured in the simulator against stock 4.0:
+
+| | Stock 4.0 | This build |
+|---|---|---|
+| Insert 4,000 tracks into 24,000 | 0.43 s | 0.26 s |
+| Play a folder of 3,000 artist folders | 10.7 s | 0.66 s |
+| Resume 16,000 tracks + 4,000 inserted | 0.08 s | ~0 s |
+
+The iPod's CPU is far slower than a desktop's, so the gaps are bigger on the device.
+
+Fixes:
+
+- A corrupt resume file can no longer make the playlist code write outside its buffer.
 
 Features:
 
-- **Jump to first letter** in the file browser: hold Select and choose "By First Letter...", or set Settings > General Settings > File View > File Browser Hotkey (last item) to it and press Select+Play. One script at a time: Latin, then Cyrillic, Japanese, Korean with Menu.
-- **Listening Stats** plugin: top tracks, albums and artists, recently played, a summary, and a "Most Played" playlist, from the playback log.
+- **Jump to first letter** in the file browser. Hold Select on any entry and choose "By First Letter...", or set Settings > General Settings > File View > File Browser Hotkey (the last item) to it and press Select+Play. It lists the first letters that exist in the folder, Latin first; Menu switches to Cyrillic, Japanese and Korean.
+- **Listening Stats** plugin (Plugins > Applications > listen_stats): top tracks, albums and artists, recently played, a summary, and a "Most Played" playlist, all from Rockbox's playback log. Artist and album come from folder names, so it works without the database.
 
-Tools:
+## Is it safe?
 
-- `tools/fnt_subset.py` trims a Rockbox `.fnt` font to a character range (useful for fonts that only ever show ASCII).
-- `tools/build-ipod.sh` builds the toolchain, the firmware and the simulator.
+Every playlist change was checked in the Rockbox simulator against unmodified 4.0: the same inserts, shuffles and resumes, with the full playlist and resume file compared after each step. Both builds produced identical output, including a playlist at the 32,000-track limit, so resume files carry over in both directions and you can switch between this build and stock.
 
-All playlist changes were checked in the simulator against unmodified Rockbox 4.0 and produce identical playlists and resume files. The directory cache parts only run on the iPod, see `TESTING.md`.
+The directory cache parts only run on real hardware. They're in daily use on my iPod, but back up your `.rockbox` folder first. [TESTING.md](TESTING.md) has the checks I used.
+
+## Installing
+
+Needs an iPod Video that already runs Rockbox 4.0 (install it with [Rockbox Utility](https://www.rockbox.org/wiki/RockboxUtility) first).
+
+1. Build `rockbox.zip` (below).
+2. Back up the `.rockbox` folder on the iPod.
+3. Unzip `rockbox.zip` onto the iPod's root, replacing files. Themes, fonts and `config.cfg` aren't in the zip, so yours are kept.
+4. Eject, let it reboot, and check System > Rockbox Info.
+
+To go back, restore your backup or unzip the official 4.0 build.
 
 ## Building
 
+On Debian or Ubuntu:
+
 ```
-tools/build-ipod.sh deps        # build dependencies (Debian/Ubuntu, as root)
+tools/build-ipod.sh deps        # build dependencies (as root)
 tools/build-ipod.sh toolchain   # ARM cross compiler, about 30 minutes, once
 tools/build-ipod.sh firmware    # -> ~/rockbox-build/ipod/rockbox.zip
 tools/build-ipod.sh sim         # desktop simulator
 ```
 
-## Installing
+## Tools
 
-1. Back up the `.rockbox` folder on the iPod.
-2. Unzip `rockbox.zip` onto the iPod's root, replacing files. Themes, fonts and `config.cfg` are not in the zip, so they are kept.
-3. Eject, let it reboot, and check the version in System > Rockbox Info.
+- `tools/fnt_subset.py` trims a Rockbox `.fnt` font to a character range, for fonts that only ever show ASCII (a battery percentage, a volume readout). Fonts with CJK glyphs can be several megabytes, and Rockbox reads them from disk as it draws.
+- `tools/build-ipod.sh` builds the toolchain, the firmware and the simulator.
 
-To go back, restore the `.rockbox` backup (or unzip the official Rockbox 4.0 build).
+## License
 
-## Testing
-
-See `TESTING.md`. After a test session, run `chkdsk` on the iPod in disk mode so file system problems show up early.
+Rockbox is GPL version 2 or later, and so are these changes. See [docs/COPYING](docs/COPYING).
