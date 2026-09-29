@@ -467,7 +467,7 @@ static int listen_stats(void* param)
     if (ret == PLUGIN_GOTO_WPS)
         return GO_TO_WPS;
     if (ret == PLUGIN_OK && browse_to[0])
-        return GO_TO_FILEBROWSER;   /* an album or artist was picked */
+        return GO_TO_FILEBROWSER;   /* a track, album or artist was picked */
     browse_to[0] = '\0';
     return GO_TO_ROOT;
 }

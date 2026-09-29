@@ -730,27 +730,40 @@ static const char *top_name(int item, void *data, char *buf, size_t bufsz)
     return buf;
 }
 
-/* set when an album or artist was picked to be shown in the file browser */
+/* set when an entry was picked to be shown in the file browser */
 static bool browse_requested;
 
-/* Select on an album or artist opens its folder in the file browser */
+/* Select opens the file browser there: inside an album or artist's
+   folder, or on a track in its album */
 static int top_action(int action, struct gui_synclist *lists)
 {
     char key[MAX_PATH];
 
-    if (action != ACTION_STD_OK || order_table == TRACKS)
+    if (action != ACTION_STD_OK)
         return action;
 
     struct stat_entry *e =
         &tables[order_table].e[order[rb->gui_synclist_get_sel_pos(lists)]];
     read_key(&e->key, key, sizeof(key) - 1);    /* room for the '/' */
-    if (key[0] != '/' || !rb->dir_exists(key))
+
+    if (order_table == TRACKS)
     {
-        rb->splash(HZ * 2, "Folder not found");
-        return ACTION_REDRAW;
+        if (key[0] != '/' || !rb->file_exists(key))
+        {
+            rb->splash(HZ * 2, "Track not found");
+            return ACTION_REDRAW;
+        }
+    }
+    else
+    {
+        if (key[0] != '/' || !rb->dir_exists(key))
+        {
+            rb->splash(HZ * 2, "Folder not found");
+            return ACTION_REDRAW;
+        }
+        rb->strlcat(key, "/", sizeof(key));
     }
 
-    rb->strlcat(key, "/", sizeof(key));
     rb->root_menu_browse_to(key);
     browse_requested = true;
     return ACTION_STD_CANCEL;
