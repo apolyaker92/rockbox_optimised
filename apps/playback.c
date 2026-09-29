@@ -352,6 +352,10 @@ static unsigned int position_key = 0;
 #define PLAYBACK_LOG_PATH ROCKBOX_DIR "/playback.log"
 #define PLAYBACK_LOG_MAX_FILESZ_BYTES (511 << 10) /* 512k approx 1000-2500 tracks */
 #define PLAYBACK_LOG_MIN_ELAPSED_MS   (500) /* 500 milliseconds */
+/* Entries are written to disk as each track finishes, so a crash or a flat
+ * battery loses nothing. Define PLAYBACK_LOG_BUFFERED to hold them in RAM
+ * until playback stops instead, saving disk spin-ups on hard drives. */
+/*#define PLAYBACK_LOG_BUFFERED*/
 #if (CONFIG_STORAGE & STORAGE_ATA)
 #define PLAYBACK_LOG_BUFSZ (MAX_PATH * 10)
 static int playback_log_handle = 0; /* core_alloc handle for playback log buffer */
@@ -1249,7 +1253,7 @@ void allocate_playback_log(void)
     if (!global_settings.playback_log)
         return;
 
-#if (CONFIG_STORAGE & STORAGE_ATA)
+#if (CONFIG_STORAGE & STORAGE_ATA) && defined(PLAYBACK_LOG_BUFFERED)
     if (playback_log_handle == 0)
     {
         playback_log_handle = core_alloc(PLAYBACK_LOG_BUFSZ);
