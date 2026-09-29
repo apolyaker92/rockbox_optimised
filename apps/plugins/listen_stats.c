@@ -21,17 +21,36 @@
 #include "plugin.h"
 
 /*
- * Reads /.rockbox/playback.log and the rotated playback_NNNN.log files,
- * whose lines are "timestamp:elapsed ms:length ms:path". Tracks, albums
- * and artists are counted by path, taking the album and artist from the
- * folders (/Music/Artist/Album/track). Only numbers and the position of
- * each name in the log are kept, names are read back when shown.
+ * Reads /.rockbox/playback.log, whose lines are "timestamp:elapsed ms:
+ * length ms:path", on top of a summary of everything played before it.
+ *
+ * When the log grows large the firmware renames it to playback_NNNN.log.
+ * Those rotated logs are moved to playback_archive/, numbered in the order
+ * they were rotated, and merged into listen_stats.dat, which holds the
+ * totals of every track ever played and the most recent plays. Archived
+ * logs are kept but never read again, so loading stays quick however long
+ * the history gets. The summary records the last archive it holds, so a
+ * merge cut short by a crash is simply done again the next time.
+ *
+ * Tracks, albums and artists are counted by path, taking the album and
+ * artist from the folders (/Music/Artist/Album/track). Only numbers and the
+ * position of each name in the files are kept, names are read back when shown.
+ *
+ * Summary lines:
+ *   M <last archive merged>
+ *   S <plays> <seconds> <first play> <last play>
+ *   T <plays> <seconds> <last play> <path>     one per track
+ *   R <time> <path>                            recent plays, oldest first
  */
 
 #define LOG_DIR         ROCKBOX_DIR
+#define ARCHIVE_DIR     LOG_DIR "/playback_archive"
+#define SUMMARY_FILE    "listen_stats.dat"
+#define SUMMARY_BACKUP  "listen_stats.bak"
+#define SUMMARY_TEMP    LOG_DIR "/listen_stats.tmp"
 #define PLAYLIST_DIR    "/Playlists"
 #define PLAYLIST_FILE   "Most Played.m3u8"
-#define MAX_LOGS        64
+#define MAX_LOGS        64  /* summary, archives not merged yet, current */
 #define RECENT_MAX      100
 #define TOP_PLAYLIST    100
 #define LOG_LINE_MAX        (MAX_PATH + 64)
@@ -57,7 +76,7 @@ struct table
 enum { TRACKS, ALBUMS, ARTISTS, NUM_TABLES };
 
 static struct table tables[NUM_TABLES];
-static char log_names[MAX_LOGS][32];
+static char log_names[MAX_LOGS][32];    /* in LOG_DIR, the summary is first */
 static int num_logs;
 
 static struct { uint32_t where; uint16_t keylen; uint32_t time; }
@@ -65,6 +84,7 @@ static struct { uint32_t where; uint16_t keylen; uint32_t time; }
 static int recent_count, recent_next;
 
 static uint32_t total_plays, total_seconds, first_time, last_time;
+static uint32_t merged_through;     /* last archive in the summary */
 
 /* sorted view of one table for the list screens */
 static uint32_t *order;
@@ -80,7 +100,7 @@ static uint32_t hash_key(const char *s, int len)
 }
 
 static void count_play(int t, const char *key, int keylen, uint32_t where,
-                       uint32_t secs, uint32_t time)
+                       uint32_t plays, uint32_t secs, uint32_t time)
 {
     struct table *tb = &tables[t];
     uint32_t h = hash_key(key, keylen);
@@ -102,7 +122,7 @@ static void count_play(int t, const char *key, int keylen, uint32_t where,
         tb->used++;
     }
 
-    tb->e[i].plays++;
+    tb->e[i].plays += plays;
     tb->e[i].seconds += secs;
     if (time >= tb->e[i].last)
         tb->e[i].last = time;
@@ -119,12 +139,60 @@ static int nth_last_slash(const char *path, int len, int n)
     return -1;
 }
 
+static void count_track(const char *path, int len, uint32_t where,
+                        uint32_t plays, uint32_t secs, uint32_t time)
+{
+    count_play(TRACKS, path, len, where, plays, secs, time);
+
+    int album = nth_last_slash(path, len, 1);
+    if (album > 0)
+        count_play(ALBUMS, path, album, where, plays, secs, time);
+
+    int artist = nth_last_slash(path, len, 2);
+    if (artist > 0)
+        count_play(ARTISTS, path, artist, where, plays, secs, time);
+}
+
+static void add_recent(uint32_t where, int len, uint32_t time)
+{
+    recent[recent_next].where = where;
+    recent[recent_next].keylen = len;
+    recent[recent_next].time = time;
+    recent_next = (recent_next + 1) % RECENT_MAX;
+    if (recent_count < RECENT_MAX)
+        recent_count++;
+}
+
 static uint32_t parse_number(char **p)
 {
     uint32_t n = 0;
     while (**p >= '0' && **p <= '9')
         n = n * 10 + (*(*p)++ - '0');
     return n;
+}
+
+/* n numbers separated by spaces, returns what follows them or NULL */
+static char *parse_numbers(char *p, uint32_t *v, int n)
+{
+    for (int i = 0; i < n; i++)
+    {
+        if (*p < '0' || *p > '9')
+            return NULL;
+        v[i] = parse_number(&p);
+        if (*p == ' ')
+            p++;
+        else if (*p != '\0')
+            return NULL;
+    }
+    return p;
+}
+
+static int path_length(const char *path)
+{
+    int len = rb->strlen(path);
+    while (len > 0 && (path[len - 1] == '\n' || path[len - 1] == '\r'))
+        len--;
+    return len;
 }
 
 static void parse_line(char *line, int log, uint32_t offset)
@@ -145,31 +213,15 @@ static void parse_line(char *line, int log, uint32_t offset)
         return;
 
     char *path = p;
-    int len = rb->strlen(path);
-    while (len > 0 && (path[len - 1] == '\n' || path[len - 1] == '\r'))
-        len--;
+    int len = path_length(path);
     if (len == 0)
         return;
 
     uint32_t where = ((uint32_t)log << 24) | (offset + (path - line));
     uint32_t secs = elapsed / 1000;
 
-    count_play(TRACKS, path, len, where, secs, time);
-
-    int album = nth_last_slash(path, len, 1);
-    if (album > 0)
-        count_play(ALBUMS, path, album, where, secs, time);
-
-    int artist = nth_last_slash(path, len, 2);
-    if (artist > 0)
-        count_play(ARTISTS, path, artist, where, secs, time);
-
-    recent[recent_next].where = where;
-    recent[recent_next].keylen = len;
-    recent[recent_next].time = time;
-    recent_next = (recent_next + 1) % RECENT_MAX;
-    if (recent_count < RECENT_MAX)
-        recent_count++;
+    count_track(path, len, where, 1, secs, time);
+    add_recent(where, len, time);
 
     total_plays++;
     total_seconds += secs;
@@ -179,93 +231,392 @@ static void parse_line(char *line, int log, uint32_t offset)
         last_time = time;
 }
 
-static int compare_names(const void *a, const void *b)
+static void parse_summary_line(char *line, uint32_t offset)
 {
-    return rb->strcmp((const char *)a, (const char *)b);
-}
+    uint32_t v[4];
+    char *path;
 
-/* rotated logs first (oldest to newest), then the current one */
-static void find_logs(void)
-{
-    num_logs = 0;
+    if (line[0] == '\0' || line[1] != ' ')
+        return;
 
-    DIR *dir = rb->opendir(LOG_DIR);
-    if (dir)
+    switch (line[0])
     {
-        struct dirent *de;
-        while ((de = rb->readdir(dir)) && num_logs < MAX_LOGS - 1)
-        {
-            if (!rb->strncmp(de->d_name, "playback_", 9) &&
-                rb->strlen(de->d_name) < sizeof(log_names[0]) &&
-                !rb->strcasecmp(de->d_name + rb->strlen(de->d_name) - 4, ".log"))
+        case 'M':
+            if (parse_numbers(line + 2, v, 1))
+                merged_through = v[0];
+            return;
+        case 'S':
+            if (parse_numbers(line + 2, v, 4))
             {
-                rb->strcpy(log_names[num_logs++], de->d_name);
+                total_plays = v[0];
+                total_seconds = v[1];
+                first_time = v[2];
+                last_time = v[3];
             }
-        }
-        rb->closedir(dir);
+            return;
+        case 'T':
+            path = parse_numbers(line + 2, v, 3);
+            break;
+        case 'R':
+            path = parse_numbers(line + 2, v, 1);
+            break;
+        default:
+            return;
     }
 
-    rb->qsort(log_names, num_logs, sizeof(log_names[0]), compare_names);
-    rb->strcpy(log_names[num_logs++], "playback.log");
+    if (!path || *path != '/')
+        return;
+    int len = path_length(path);
+    uint32_t where = offset + (path - line);    /* the summary is log 0 */
+
+    if (line[0] == 'T')
+        count_track(path, len, where, v[0], v[1], v[2]);
+    else
+        add_recent(where, len, v[0]);
 }
 
-static bool read_logs(void)
+static void add_log(const char *name)
+{
+    rb->strlcpy(log_names[num_logs++], name, sizeof(log_names[0]));
+}
+
+static bool read_log(int log)
 {
     static char line[LOG_LINE_MAX];
-    long next_progress = *rb->current_tick;
+    static long next_progress;
+    char path[MAX_PATH];
 
-    for (int log = 0; log < num_logs; log++)
+    rb->snprintf(path, sizeof(path), LOG_DIR "/%s", log_names[log]);
+    int fd = rb->open(path, O_RDONLY);
+    if (fd < 0)
+        return true;
+
+    uint32_t offset = 0;
+    int n;
+    while ((n = rb->read_line(fd, line, sizeof(line))) > 0)
     {
-        char path[MAX_PATH];
-        rb->snprintf(path, sizeof(path), LOG_DIR "/%s", log_names[log]);
-        int fd = rb->open(path, O_RDONLY);
-        if (fd < 0)
-            continue;
+        if (line[0] == '#')
+            ;
+        else if (log == 0)
+            parse_summary_line(line, offset);
+        else
+            parse_line(line, log, offset);
+        offset += n;
 
-        uint32_t offset = 0;
-        int n;
-        while ((n = rb->read_line(fd, line, sizeof(line))) > 0)
+        if (TIME_AFTER(*rb->current_tick, next_progress))
         {
-            if (line[0] != '#')
-                parse_line(line, log, offset);
-            offset += n;
-
-            if (TIME_AFTER(*rb->current_tick, next_progress))
+            rb->splashf(0, "Reading %s...", log_names[log]);
+            next_progress = *rb->current_tick + HZ / 2;
+            if (rb->action_userabort(TIMEOUT_NOBLOCK))
             {
-                rb->splashf(0, "Reading %s...", log_names[log]);
-                next_progress = *rb->current_tick + HZ / 2;
-                if (rb->action_userabort(TIMEOUT_NOBLOCK))
-                {
-                    rb->close(fd);
-                    return false;
-                }
+                rb->close(fd);
+                return false;
             }
         }
-        rb->close(fd);
     }
+    rb->close(fd);
     return true;
+}
+
+/* n if name is what fmt makes of it after prefix, otherwise 0 */
+static uint32_t log_number(const char *name, const char *prefix,
+                           const char *fmt)
+{
+    char made[32];
+    int len = rb->strlen(prefix);
+
+    if (rb->strncasecmp(name, prefix, len))
+        return 0;
+    char *s = (char *)name + len;
+    uint32_t n = parse_number(&s);
+    rb->snprintf(made, sizeof(made), fmt, (unsigned long)n);
+    return rb->strcasecmp(name, made) ? 0 : n;
+}
+
+#define ROTATED_NAME    "playback_%04lu.log"
+#define ARCHIVE_NAME    "%06lu.log"
+
+/* add n to a sorted list, keeping the max smallest */
+static void keep_smallest(uint32_t *list, int *count, int max, uint32_t n)
+{
+    int i = *count;
+
+    if (i == max)
+    {
+        if (n >= list[max - 1])
+            return;
+        i--;
+    }
+    else
+        (*count)++;
+
+    while (i > 0 && list[i - 1] > n)
+    {
+        list[i] = list[i - 1];
+        i--;
+    }
+    list[i] = n;
+}
+
+/* the archived logs after 'after', oldest first, at most max of them */
+static int find_archives(uint32_t after, uint32_t *list, int max)
+{
+    int count = 0;
+    DIR *dir = rb->opendir(ARCHIVE_DIR);
+    if (!dir)
+        return 0;
+
+    struct dirent *de;
+    while ((de = rb->readdir(dir)))
+    {
+        uint32_t n = log_number(de->d_name, "", ARCHIVE_NAME);
+        if (n > after)
+            keep_smallest(list, &count, max, n);
+    }
+    rb->closedir(dir);
+    return count;
+}
+
+/* the highest archive number used, merged or not */
+static uint32_t last_archive(void)
+{
+    uint32_t last = merged_through;
+    DIR *dir = rb->opendir(ARCHIVE_DIR);
+    if (!dir)
+        return last;
+
+    struct dirent *de;
+    while ((de = rb->readdir(dir)))
+    {
+        uint32_t n = log_number(de->d_name, "", ARCHIVE_NAME);
+        if (n > last)
+            last = n;
+    }
+    rb->closedir(dir);
+    return last;
+}
+
+/* move the logs the firmware rotated to the archive, oldest first,
+   false if some could not be moved and so are left out this time */
+static bool archive_rotated_logs(void)
+{
+    uint32_t rotated[MAX_LOGS];
+    char from[MAX_PATH], to[MAX_PATH];
+    int count;
+
+    do
+    {
+        count = 0;
+        DIR *dir = rb->opendir(LOG_DIR);
+        if (!dir)
+            return false;
+        struct dirent *de;
+        while ((de = rb->readdir(dir)))
+        {
+            uint32_t n = log_number(de->d_name, "playback_", ROTATED_NAME);
+            if (n)
+                keep_smallest(rotated, &count, MAX_LOGS, n);
+        }
+        rb->closedir(dir);
+
+        if (count == 0)
+            return true;
+        if (!rb->dir_exists(ARCHIVE_DIR) && rb->mkdir(ARCHIVE_DIR) < 0)
+            return false;
+
+        /* never reuse a number, even if archives were deleted */
+        uint32_t next = last_archive();
+
+        for (int i = 0; i < count; i++)
+        {
+            rb->snprintf(from, sizeof(from), LOG_DIR "/" ROTATED_NAME,
+                         (unsigned long)rotated[i]);
+            rb->snprintf(to, sizeof(to), ARCHIVE_DIR "/" ARCHIVE_NAME,
+                         (unsigned long)++next);
+            if (rb->rename(from, to) < 0)
+                return false;
+        }
+    } while (count == MAX_LOGS);
+    return true;
+}
+
+/* the last key file read, kept open while a list is shown or saved */
+static int key_fd = -1;
+static int key_log = -1;
+
+static void close_key_file(void)
+{
+    if (key_fd >= 0)
+        rb->close(key_fd);
+    key_fd = -1;
+    key_log = -1;
 }
 
 /* read a stored key (path or path prefix) back from its log */
 static char *read_key(uint32_t where, int keylen, char *buf, int bufsz)
 {
     int log = where >> 24;
-    char path[MAX_PATH];
 
     buf[0] = '\0';
     if (log >= num_logs || keylen >= bufsz)
         return buf;
 
-    rb->snprintf(path, sizeof(path), LOG_DIR "/%s", log_names[log]);
-    int fd = rb->open(path, O_RDONLY);
-    if (fd < 0)
-        return buf;
+    if (log != key_log)
+    {
+        char path[MAX_PATH];
 
-    if (rb->lseek(fd, where & 0xffffff, SEEK_SET) >= 0 &&
-        rb->read(fd, buf, keylen) == keylen)
+        close_key_file();
+        rb->snprintf(path, sizeof(path), LOG_DIR "/%s", log_names[log]);
+        key_fd = rb->open(path, O_RDONLY);
+        if (key_fd < 0)
+            return buf;
+        key_log = log;
+    }
+
+    if (rb->lseek(key_fd, where & 0xffffff, SEEK_SET) >= 0 &&
+        rb->read(key_fd, buf, keylen) == keylen)
         buf[keylen] = '\0';
-    rb->close(fd);
     return buf;
+}
+
+static bool write_line(int fd, char *buf, int bufsz, int len)
+{
+    return len >= 0 && len < bufsz && rb->write(fd, buf, len) == len;
+}
+
+static int compare_where(const void *a, const void *b)
+{
+    uint32_t wa = tables[TRACKS].e[*(const uint32_t *)a].where;
+    uint32_t wb = tables[TRACKS].e[*(const uint32_t *)b].where;
+    return wa < wb ? -1 : wa > wb;
+}
+
+/* write everything read so far as the summary of archives up to through */
+static bool write_summary(uint32_t through)
+{
+    static char line[LOG_LINE_MAX];
+    char key[MAX_PATH];
+
+    int fd = rb->open(SUMMARY_TEMP, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0)
+        return false;
+
+    bool ok = write_line(fd, line, sizeof(line),
+        rb->snprintf(line, sizeof(line),
+                     "# Listening Stats summary, rewritten when logs merge\n"
+                     "M %lu\nS %lu %lu %lu %lu\n", (unsigned long)through,
+                     (unsigned long)total_plays, (unsigned long)total_seconds,
+                     (unsigned long)first_time, (unsigned long)last_time));
+
+    /* in file order so each log is read straight through */
+    order_count = 0;
+    for (int i = 0; i < tables[TRACKS].size; i++)
+    {
+        if (tables[TRACKS].e[i].hash)
+            order[order_count++] = i;
+    }
+    rb->qsort(order, order_count, sizeof(*order), compare_where);
+
+    for (int i = 0; ok && i < order_count; i++)
+    {
+        struct stat_entry *e = &tables[TRACKS].e[order[i]];
+        ok = *read_key(e->where, e->keylen, key, sizeof(key)) == '/' &&
+            write_line(fd, line, sizeof(line),
+                rb->snprintf(line, sizeof(line), "T %lu %lu %lu %s\n",
+                             (unsigned long)e->plays, (unsigned long)e->seconds,
+                             (unsigned long)e->last, key));
+    }
+
+    for (int i = 0; ok && i < recent_count; i++)
+    {
+        int r = (recent_next - recent_count + i + RECENT_MAX) % RECENT_MAX;
+        ok = *read_key(recent[r].where, recent[r].keylen, key, sizeof(key)) == '/' &&
+            write_line(fd, line, sizeof(line),
+                rb->snprintf(line, sizeof(line), "R %lu %s\n",
+                             (unsigned long)recent[r].time, key));
+    }
+
+    close_key_file();
+    if (rb->close(fd) < 0)
+        ok = false;
+    if (!ok)
+    {
+        rb->remove(SUMMARY_TEMP);
+        return false;
+    }
+
+    /* the old summary stays as the backup until the new one is in place */
+    if (rb->file_exists(LOG_DIR "/" SUMMARY_FILE))
+    {
+        if (rb->rename(LOG_DIR "/" SUMMARY_FILE, LOG_DIR "/" SUMMARY_BACKUP) < 0)
+            return false;
+        /* names are still read from the old one */
+        rb->strlcpy(log_names[0], SUMMARY_BACKUP, sizeof(log_names[0]));
+    }
+    return rb->rename(SUMMARY_TEMP, LOG_DIR "/" SUMMARY_FILE) >= 0;
+}
+
+static void reset_stats(void)
+{
+    for (int t = 0; t < NUM_TABLES; t++)
+    {
+        rb->memset(tables[t].e, 0, tables[t].size * sizeof(struct stat_entry));
+        tables[t].used = 0;
+        tables[t].full = false;
+    }
+    recent_count = recent_next = 0;
+    total_plays = total_seconds = first_time = last_time = 0;
+    merged_through = 0;
+    num_logs = 0;
+    close_key_file();
+}
+
+/* summary, then archives not merged into it yet (merging them), then
+   the current log */
+static bool load_stats(void)
+{
+    uint32_t archives[MAX_LOGS - 2];
+
+    for (;;)
+    {
+        reset_stats();
+
+        /* no summary means the last one was cut short, use the one before */
+        add_log(rb->file_exists(LOG_DIR "/" SUMMARY_FILE) ?
+                SUMMARY_FILE : SUMMARY_BACKUP);
+        if (!read_log(0))
+            return false;
+
+        if (!archive_rotated_logs())
+            rb->splash(HZ * 2, "Can't move old logs, some left out");
+        int count = find_archives(merged_through, archives, ARRAYLEN(archives));
+        for (int i = 0; i < count; i++)
+        {
+            rb->snprintf(log_names[num_logs++], sizeof(log_names[0]),
+                         "playback_archive/" ARCHIVE_NAME,
+                         (unsigned long)archives[i]);
+            if (!read_log(num_logs - 1))
+                return false;
+        }
+
+        if (count == 0)
+            break;
+        if (tables[TRACKS].full || tables[ALBUMS].full || tables[ARTISTS].full)
+        {
+            rb->splash(HZ * 2, "Too many tracks, old logs not merged");
+            break;
+        }
+        rb->splash(0, "Merging old logs...");
+        if (!write_summary(archives[count - 1]))
+        {
+            rb->splash(HZ * 2, "Can't save the summary");
+            break;
+        }
+        /* read back what was merged, then any archives left over */
+    }
+
+    add_log("playback.log");
+    return read_log(num_logs - 1);
 }
 
 /* path component counted from the end, 0 = last */
@@ -402,7 +753,7 @@ static void show_recent(void)
     rb->simplelist_show_list(&info);
 }
 
-static char summary[8][48];
+static char summary[9][48];
 
 static const char *summary_name(int item, void *data, char *buf, size_t bufsz)
 {
@@ -435,7 +786,10 @@ static void show_summary(void)
         rb->snprintf(summary[n++], sizeof(summary[0]), "From: %s", from);
         rb->snprintf(summary[n++], sizeof(summary[0]), "To: %s", to);
     }
-    rb->snprintf(summary[n++], sizeof(summary[0]), "Logs read: %d", num_logs);
+    rb->snprintf(summary[n++], sizeof(summary[0]), "Logs merged: %lu",
+                 (unsigned long)merged_through);
+    rb->snprintf(summary[n++], sizeof(summary[0]), "Logs read: %d",
+                 num_logs - 1);
 
     rb->simplelist_info_init(&info, "Summary", n, NULL);
     info.get_name = summary_name;
@@ -497,35 +851,14 @@ static bool setup_tables(void)
     {
         tables[t].e = (struct stat_entry *)buf;
         tables[t].size = sizes[t];
-        tables[t].used = 0;
-        tables[t].full = false;
-        rb->memset(buf, 0, sizes[t] * sizeof(struct stat_entry));
         buf += sizes[t] * sizeof(struct stat_entry);
     }
     order = (uint32_t *)buf;
     return tracks > 16;
 }
 
-enum plugin_status plugin_start(const void *parameter)
+static enum plugin_status run_menu(void)
 {
-    (void)parameter;
-
-    if (!rb->global_settings->playback_log)
-    {
-        if (!rb->yesno_pop("Playback logging is off. Turn it on?"))
-            return PLUGIN_OK;
-        rb->global_settings->playback_log = true;
-        rb->settings_save();
-        rb->splash(HZ * 2, "Stats will start from the next track");
-    }
-
-    if (!setup_tables())
-        return PLUGIN_ERROR;
-
-    find_logs();
-    if (!read_logs())
-        return PLUGIN_OK;
-
     MENUITEM_STRINGLIST(menu, "Listening Stats", NULL,
                         "Top Tracks", "Top Albums", "Top Artists",
                         "Recently Played", "Summary",
@@ -548,4 +881,27 @@ enum plugin_status plugin_start(const void *parameter)
             default: return PLUGIN_OK;
         }
     }
+}
+
+enum plugin_status plugin_start(const void *parameter)
+{
+    (void)parameter;
+
+    if (!rb->global_settings->playback_log)
+    {
+        if (!rb->yesno_pop("Playback logging is off. Turn it on?"))
+            return PLUGIN_OK;
+        rb->global_settings->playback_log = true;
+        rb->settings_save();
+        rb->splash(HZ * 2, "Stats will start from the next track");
+    }
+
+    if (!setup_tables())
+        return PLUGIN_ERROR;
+
+    enum plugin_status status = PLUGIN_OK;
+    if (load_stats())
+        status = run_menu();
+    close_key_file();
+    return status;
 }
