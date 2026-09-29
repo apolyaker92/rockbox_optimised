@@ -33,7 +33,7 @@ Fixes:
 Features:
 
 - **Jump to first letter** in the file browser. Hold Select on any entry and choose "By First Letter...", or set Settings > General Settings > File View > File Browser Hotkey (the last item) to it and press Select+Play. It lists the first letters that exist in the folder, Latin first; Menu switches to Cyrillic, Japanese and Korean.
-- **Listening Stats** plugin (Plugins > Applications > listen_stats): top tracks, albums and artists, recently played, a summary, and a "Most Played" playlist, all from Rockbox's playback log. Artist and album come from folder names, so it works without the database.
+- **Listening Stats** in the main menu: top tracks, albums and artists, recently played, a summary, and a "Most Played" playlist, all from Rockbox's playback log. Artist and album come from folder names, so it works without the database. Select on a track, album or artist opens it in the file browser. Old playback logs are merged into a summary (`.rockbox/listen_stats.dat`, with the logs kept in `.rockbox/playback_archive/`), so it opens quickly however long the history gets, and it has room for over a million tracks. Playback stops while the stats are open, and "Most Played" is saved to the playlist catalog folder (`/Playlists` unless set otherwise). It's also in Plugins > Applications as listen_stats.
 
 ## Is it safe?
 
@@ -47,8 +47,10 @@ Needs an iPod Video that already runs Rockbox 4.0 (install it with [Rockbox Util
 
 1. Build `rockbox.zip` (below).
 2. Back up the `.rockbox` folder on the iPod.
-3. Unzip `rockbox.zip` onto the iPod's root, replacing files. Themes, fonts and `config.cfg` aren't in the zip, so yours are kept.
+3. Unzip `rockbox.zip` onto the iPod's root, replacing files. `config.cfg` isn't in the zip, and neither are your own themes and fonts, so yours are kept; only the stock cabbiev2 theme and default font are replaced.
 4. Eject, let it reboot, and check System > Rockbox Info.
+
+If you've changed the order of the main menu, Listening Stats won't be in it yet. Add it with Plugins > Applications > main_menu_config.
 
 To go back, restore your backup or unzip the official 4.0 build.
 
