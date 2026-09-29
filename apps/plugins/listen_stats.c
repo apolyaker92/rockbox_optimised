@@ -730,6 +730,32 @@ static const char *top_name(int item, void *data, char *buf, size_t bufsz)
     return buf;
 }
 
+/* set when an album or artist was picked to be shown in the file browser */
+static bool browse_requested;
+
+/* Select on an album or artist opens its folder in the file browser */
+static int top_action(int action, struct gui_synclist *lists)
+{
+    char key[MAX_PATH];
+
+    if (action != ACTION_STD_OK || order_table == TRACKS)
+        return action;
+
+    struct stat_entry *e =
+        &tables[order_table].e[order[rb->gui_synclist_get_sel_pos(lists)]];
+    read_key(&e->key, key, sizeof(key) - 1);    /* room for the '/' */
+    if (key[0] != '/' || !rb->dir_exists(key))
+    {
+        rb->splash(HZ * 2, "Folder not found");
+        return ACTION_REDRAW;
+    }
+
+    rb->strlcat(key, "/", sizeof(key));
+    rb->root_menu_browse_to(key);
+    browse_requested = true;
+    return ACTION_STD_CANCEL;
+}
+
 static void show_top(int t, const char *title)
 {
     struct simplelist_info info;
@@ -742,6 +768,7 @@ static void show_top(int t, const char *title)
     }
     rb->simplelist_info_init(&info, (char *)title, order_count, NULL);
     info.get_name = top_name;
+    info.action_callback = top_action;
     rb->simplelist_show_list(&info);
 }
 
@@ -913,6 +940,8 @@ static enum plugin_status run_menu(void)
             case 5: save_playlist(); break;
             default: return PLUGIN_OK;
         }
+        if (browse_requested)
+            return PLUGIN_OK;
     }
 }
 

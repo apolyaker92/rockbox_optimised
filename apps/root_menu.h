@@ -32,6 +32,11 @@ struct menu_table {
 
 struct menu_table *root_menu_get_options(int *nb_options);
 
+/* open the file browser at path the next time it is shown, a path ending
+   in '/' opens that folder, otherwise its parent with the item selected.
+   A plugin sets this before it exits to take the user there. */
+void root_menu_browse_to(const char *path);
+
 enum {
     /* from old menu api, but still required*/
     MENU_ATTACHED_USB = -10,
@@ -64,7 +69,8 @@ enum {
     GO_TO_PLAYLISTS_SCREEN,
     GO_TO_PLAYLIST_VIEWER,
     GO_TO_SYSTEM_SCREEN,
-    GO_TO_SHORTCUTMENU
+    GO_TO_SHORTCUTMENU,
+    GO_TO_LISTEN_STATS
 };
 #ifndef PLUGIN
 extern struct menu_item_ex root_menu_;

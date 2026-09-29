@@ -109,6 +109,13 @@ static void rootmenu_track_changed_callback(unsigned short id, void* param)
     struct mp3entry *id3 = ((struct track_event *)param)->id3;
     strmemccpy(current_track_path, id3->path, MAX_PATH);
 }
+
+static char browse_to[MAX_PATH];
+void root_menu_browse_to(const char *path)
+{
+    strmemccpy(browse_to, path ? path : "", sizeof(browse_to));
+}
+
 static int browser(void* param)
 {
     int ret_val;
@@ -128,7 +135,12 @@ static int browser(void* param)
     {
         case GO_TO_FILEBROWSER:
             filter = global_settings.dirfilter;
-            if (global_settings.browse_current &&
+            if (browse_to[0])
+            {
+                strcpy(folder, browse_to);
+                browse_to[0] = '\0';
+            }
+            else if (global_settings.browse_current &&
                     last_screen == GO_TO_WPS &&
                     current_track_path[0])
             {
@@ -446,6 +458,20 @@ static int load_bmarks(void* param)
     return GO_TO_PREVIOUS;
 }
 
+static int listen_stats(void* param)
+{
+    (void)param;
+    browse_to[0] = '\0';
+    int ret = plugin_load(PLUGIN_APPS_DIR "/listen_stats.rock", NULL);
+
+    if (ret == PLUGIN_GOTO_WPS)
+        return GO_TO_WPS;
+    if (ret == PLUGIN_OK && browse_to[0])
+        return GO_TO_FILEBROWSER;   /* an album or artist was picked */
+    browse_to[0] = '\0';
+    return GO_TO_ROOT;
+}
+
 /* These are all static const'd from apps/menus/ *.c
    so little hack so we can use them */
 extern struct menu_item_ex
@@ -483,6 +509,7 @@ static const struct root_items items[] = {
     [GO_TO_PLAYLIST_VIEWER] = { playlist_view, NULL, &playlist_options },
     [GO_TO_SYSTEM_SCREEN] = { miscscrn, &info_menu, &system_menu },
     [GO_TO_SHORTCUTMENU] = { do_shortcut_menu, NULL, NULL },
+    [GO_TO_LISTEN_STATS] = { listen_stats, NULL, NULL },
 
 };
 static const int nb_items = sizeof(items)/sizeof(*items);
@@ -530,6 +557,8 @@ MENUITEM_RETURNVALUE(playlists, ID2P(LANG_PLAYLISTS), GO_TO_PLAYLISTS_SCREEN,
                      NULL, Icon_Playlist);
 MENUITEM_RETURNVALUE(system_menu_, ID2P(LANG_SYSTEM), GO_TO_SYSTEM_SCREEN,
                      NULL, Icon_System_menu);
+MENUITEM_RETURNVALUE(listen_stats_item, ID2P(LANG_LISTEN_STATS),
+                     GO_TO_LISTEN_STATS, NULL, Icon_Audio);
 
 struct menu_item_ex root_menu_;
 static struct menu_callback_with_desc root_menu_desc = {
@@ -551,6 +580,7 @@ static struct menu_table menu_table[] = {
     { "radio", &fm },
 #endif
     { "playlists", &playlists },
+    { "listen_stats", &listen_stats_item },
     { "plugins", &rocks_browser },
     { "system_menu", &system_menu_ },
     { "shortcuts", &shortcut_menu },
@@ -782,6 +812,7 @@ static int load_plugin_screen(char *key)
             param = NULL;
         if (path[0] == '\0' && key)
             path = P2STR((unsigned char *)key);
+        browse_to[0] = '\0';
         int ret = plugin_load(path, param);
 
         if (ret == PLUGIN_USB_CONNECTED || ret == PLUGIN_ERROR)
@@ -813,7 +844,12 @@ static int load_plugin_screen(char *key)
                 ? GO_TO_ROOT : old_previous;
             if (last_screen == GO_TO_ROOT)
                 global_status.last_screen = GO_TO_ROOT;
+            /* the plugin asked to show a folder */
+            if (ret == PLUGIN_OK && browse_to[0])
+                ret_val = GO_TO_FILEBROWSER;
         }
+        if (ret_val != GO_TO_FILEBROWSER)
+            browse_to[0] = '\0';
         /* ret_val != GO_TO_PLUGIN */
 
         if (opret != OPEN_PLUGIN_NEEDS_FLUSHED || last_screen != GO_TO_WPS)

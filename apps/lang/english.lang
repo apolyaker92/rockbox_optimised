@@ -17065,3 +17065,17 @@
     *: "Playlist finished. Play again?"
   </voice>
 </phrase>
+<phrase>
+  id: LANG_LISTEN_STATS
+  desc: in main menu, opens the Listening Stats
+  user: core
+  <source>
+    *: "Listening Stats"
+  </source>
+  <dest>
+    *: "Listening Stats"
+  </dest>
+  <voice>
+    *: "Listening Stats"
+  </voice>
+</phrase>

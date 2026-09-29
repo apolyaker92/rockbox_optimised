@@ -174,7 +174,7 @@ int plugin_open(const char *plugin, const char *parameter);
  * when this happens please take the opportunity to sort in
  * any new functions "waiting" at the end of the list.
  */
-#define PLUGIN_API_VERSION 273
+#define PLUGIN_API_VERSION 274
 
 /* 239 Marks the removal of ARCHOS HWCODEC and CHARCELL */
 
@@ -992,6 +992,7 @@ struct plugin_api {
        the API gets incompatible */
     void (*add_playbacklog)(struct mp3entry *id3);
     struct battery_tables_t *device_battery_tables;
+    void (*root_menu_browse_to)(const char *path);
 };
 
 /* plugin header */
