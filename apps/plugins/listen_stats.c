@@ -877,8 +877,9 @@ static bool setup_tables(void)
     rb->audio_stop();
     char *buf = rb->plugin_get_audio_buffer(&size);
 
-    /* tracks get 8 parts, albums 2, artists 1, plus a sort index per track */
-    int tracks = MIN(size / (11 * sizeof(struct stat_entry) / 8 + sizeof(uint32_t)),
+    /* tracks get 8 parts, albums 2, artists 1, plus a sort index per track,
+       rounded up so the tables never run past the buffer */
+    int tracks = MIN(size / ((11 * sizeof(struct stat_entry) + 7) / 8 + sizeof(uint32_t)),
                      (size_t)MAX_TRACKS);
     int sizes[NUM_TABLES] = { tracks, tracks / 4, tracks / 8 };
 
