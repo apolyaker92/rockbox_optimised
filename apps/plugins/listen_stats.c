@@ -35,6 +35,8 @@
  * Tracks, albums and artists are counted by path, taking the album and
  * artist from the folders (/Music/Artist/Album/track). Only numbers and the
  * position of each name in the files are kept, names are read back when shown.
+ * The tables live in the audio buffer, so playback is stopped while the
+ * stats are open, and hold over a million tracks.
  *
  * Summary lines:
  *   M <last archive merged>
@@ -48,21 +50,32 @@
 #define SUMMARY_FILE    "listen_stats.dat"
 #define SUMMARY_BACKUP  "listen_stats.bak"
 #define SUMMARY_TEMP    LOG_DIR "/listen_stats.tmp"
-#define PLAYLIST_DIR    "/Playlists"
+#define PLAYLIST_DIR    "/Playlists"    /* if no catalog folder is set */
 #define PLAYLIST_FILE   "Most Played.m3u8"
 #define MAX_LOGS        64  /* summary, archives not merged yet, current */
+#define MAX_TRACKS      (1 << 20)   /* more than any library, keeps
+                                       clearing the tables quick */
 #define RECENT_MAX      100
 #define TOP_PLAYLIST    100
 #define LOG_LINE_MAX        (MAX_PATH + 64)
 
+/* where a name (path or path prefix) is stored */
+struct key
+{
+    uint32_t offset;
+    uint16_t len;
+    uint8_t log;        /* index into log_names */
+};
+
 struct stat_entry
 {
     uint32_t hash;      /* of the key, 0 = unused slot */
+    uint32_t check;     /* second hash of the key, so keys sharing a hash
+                           are still told apart */
     uint32_t plays;
     uint32_t seconds;   /* listened */
     uint32_t last;      /* timestamp of the last play */
-    uint32_t where;     /* log number << 24 | offset of the path */
-    uint16_t keylen;    /* length of the key at that position */
+    struct key key;
 };
 
 struct table
@@ -79,8 +92,7 @@ static struct table tables[NUM_TABLES];
 static char log_names[MAX_LOGS][32];    /* in LOG_DIR, the summary is first */
 static int num_logs;
 
-static struct { uint32_t where; uint16_t keylen; uint32_t time; }
-    recent[RECENT_MAX];
+static struct { struct key key; uint32_t time; } recent[RECENT_MAX];
 static int recent_count, recent_next;
 
 static uint32_t total_plays, total_seconds, first_time, last_time;
@@ -99,14 +111,26 @@ static uint32_t hash_key(const char *s, int len)
     return h ? h : 1;
 }
 
-static void count_play(int t, const char *key, int keylen, uint32_t where,
+static uint32_t check_key(const char *s, int len)
+{
+    uint32_t h = 0x9747b28c;
+    while (len--)
+    {
+        h = (h ^ (unsigned char)*s++) * 0x5bd1e995;
+        h ^= h >> 15;
+    }
+    return h;
+}
+
+static void count_play(int t, const char *name, const struct key *key,
                        uint32_t plays, uint32_t secs, uint32_t time)
 {
     struct table *tb = &tables[t];
-    uint32_t h = hash_key(key, keylen);
+    uint32_t h = hash_key(name, key->len);
+    uint32_t c = check_key(name, key->len);
     int i = h % tb->size;
 
-    while (tb->e[i].hash && tb->e[i].hash != h)
+    while (tb->e[i].hash && (tb->e[i].hash != h || tb->e[i].check != c))
         i = (i + 1) % tb->size;
 
     if (!tb->e[i].hash)
@@ -117,8 +141,8 @@ static void count_play(int t, const char *key, int keylen, uint32_t where,
             return;
         }
         tb->e[i].hash = h;
-        tb->e[i].where = where;
-        tb->e[i].keylen = keylen;
+        tb->e[i].check = c;
+        tb->e[i].key = *key;
         tb->used++;
     }
 
@@ -139,24 +163,30 @@ static int nth_last_slash(const char *path, int len, int n)
     return -1;
 }
 
-static void count_track(const char *path, int len, uint32_t where,
+static void count_track(const char *path, struct key key,
                         uint32_t plays, uint32_t secs, uint32_t time)
 {
-    count_play(TRACKS, path, len, where, plays, secs, time);
+    int len = key.len;
+    count_play(TRACKS, path, &key, plays, secs, time);
 
     int album = nth_last_slash(path, len, 1);
     if (album > 0)
-        count_play(ALBUMS, path, album, where, plays, secs, time);
+    {
+        key.len = album;
+        count_play(ALBUMS, path, &key, plays, secs, time);
+    }
 
     int artist = nth_last_slash(path, len, 2);
     if (artist > 0)
-        count_play(ARTISTS, path, artist, where, plays, secs, time);
+    {
+        key.len = artist;
+        count_play(ARTISTS, path, &key, plays, secs, time);
+    }
 }
 
-static void add_recent(uint32_t where, int len, uint32_t time)
+static void add_recent(const struct key *key, uint32_t time)
 {
-    recent[recent_next].where = where;
-    recent[recent_next].keylen = len;
+    recent[recent_next].key = *key;
     recent[recent_next].time = time;
     recent_next = (recent_next + 1) % RECENT_MAX;
     if (recent_count < RECENT_MAX)
@@ -217,11 +247,11 @@ static void parse_line(char *line, int log, uint32_t offset)
     if (len == 0)
         return;
 
-    uint32_t where = ((uint32_t)log << 24) | (offset + (path - line));
+    struct key key = { offset + (path - line), len, log };
     uint32_t secs = elapsed / 1000;
 
-    count_track(path, len, where, 1, secs, time);
-    add_recent(where, len, time);
+    count_track(path, key, 1, secs, time);
+    add_recent(&key, time);
 
     total_plays++;
     total_seconds += secs;
@@ -266,13 +296,12 @@ static void parse_summary_line(char *line, uint32_t offset)
 
     if (!path || *path != '/')
         return;
-    int len = path_length(path);
-    uint32_t where = offset + (path - line);    /* the summary is log 0 */
+    struct key key = { offset + (path - line), path_length(path), 0 };
 
     if (line[0] == 'T')
-        count_track(path, len, where, v[0], v[1], v[2]);
+        count_track(path, key, v[0], v[1], v[2]);
     else
-        add_recent(where, len, v[0]);
+        add_recent(&key, v[0]);
 }
 
 static void add_log(const char *name)
@@ -453,29 +482,27 @@ static void close_key_file(void)
 }
 
 /* read a stored key (path or path prefix) back from its log */
-static char *read_key(uint32_t where, int keylen, char *buf, int bufsz)
+static char *read_key(const struct key *key, char *buf, int bufsz)
 {
-    int log = where >> 24;
-
     buf[0] = '\0';
-    if (log >= num_logs || keylen >= bufsz)
+    if (key->log >= num_logs || key->len >= bufsz)
         return buf;
 
-    if (log != key_log)
+    if (key->log != key_log)
     {
         char path[MAX_PATH];
 
         close_key_file();
-        rb->snprintf(path, sizeof(path), LOG_DIR "/%s", log_names[log]);
+        rb->snprintf(path, sizeof(path), LOG_DIR "/%s", log_names[key->log]);
         key_fd = rb->open(path, O_RDONLY);
         if (key_fd < 0)
             return buf;
-        key_log = log;
+        key_log = key->log;
     }
 
-    if (rb->lseek(key_fd, where & 0xffffff, SEEK_SET) >= 0 &&
-        rb->read(key_fd, buf, keylen) == keylen)
-        buf[keylen] = '\0';
+    if (rb->lseek(key_fd, key->offset, SEEK_SET) >= 0 &&
+        rb->read(key_fd, buf, key->len) == key->len)
+        buf[key->len] = '\0';
     return buf;
 }
 
@@ -486,9 +513,11 @@ static bool write_line(int fd, char *buf, int bufsz, int len)
 
 static int compare_where(const void *a, const void *b)
 {
-    uint32_t wa = tables[TRACKS].e[*(const uint32_t *)a].where;
-    uint32_t wb = tables[TRACKS].e[*(const uint32_t *)b].where;
-    return wa < wb ? -1 : wa > wb;
+    const struct key *ka = &tables[TRACKS].e[*(const uint32_t *)a].key;
+    const struct key *kb = &tables[TRACKS].e[*(const uint32_t *)b].key;
+    if (ka->log != kb->log)
+        return ka->log < kb->log ? -1 : 1;
+    return ka->offset < kb->offset ? -1 : ka->offset > kb->offset;
 }
 
 /* write everything read so far as the summary of archives up to through */
@@ -520,7 +549,7 @@ static bool write_summary(uint32_t through)
     for (int i = 0; ok && i < order_count; i++)
     {
         struct stat_entry *e = &tables[TRACKS].e[order[i]];
-        ok = *read_key(e->where, e->keylen, key, sizeof(key)) == '/' &&
+        ok = *read_key(&e->key, key, sizeof(key)) == '/' &&
             write_line(fd, line, sizeof(line),
                 rb->snprintf(line, sizeof(line), "T %lu %lu %lu %s\n",
                              (unsigned long)e->plays, (unsigned long)e->seconds,
@@ -530,7 +559,7 @@ static bool write_summary(uint32_t through)
     for (int i = 0; ok && i < recent_count; i++)
     {
         int r = (recent_next - recent_count + i + RECENT_MAX) % RECENT_MAX;
-        ok = *read_key(recent[r].where, recent[r].keylen, key, sizeof(key)) == '/' &&
+        ok = *read_key(&recent[r].key, key, sizeof(key)) == '/' &&
             write_line(fd, line, sizeof(line),
                 rb->snprintf(line, sizeof(line), "R %lu %s\n",
                              (unsigned long)recent[r].time, key));
@@ -679,7 +708,7 @@ static const char *top_name(int item, void *data, char *buf, size_t bufsz)
     struct stat_entry *e = &tables[order_table].e[order[item]];
     char key[MAX_PATH], a[64], b[64];
 
-    read_key(e->where, e->keylen, key, sizeof(key));
+    read_key(&e->key, key, sizeof(key));
 
     switch (order_table)
     {
@@ -731,7 +760,7 @@ static const char *recent_name(int item, void *data, char *buf, size_t bufsz)
     int i = (recent_next - 1 - item + RECENT_MAX) % RECENT_MAX;
     char key[MAX_PATH], a[64], b[64], date[12];
 
-    read_key(recent[i].where, recent[i].keylen, key, sizeof(key));
+    read_key(&recent[i].key, key, sizeof(key));
     format_date(recent[i].time, date, sizeof(date));
     component(key, 0, a, sizeof(a));
     rb->snprintf(buf, bufsz, "%s  %s - %s", date, strip_ext(a),
@@ -796,55 +825,61 @@ static void show_summary(void)
     rb->simplelist_show_list(&info);
 }
 
-/* returns true if playback of the new playlist was started */
-static bool save_playlist(void)
+/* into the playlist catalog folder, ready to play from there */
+static void save_playlist(void)
 {
-    char key[MAX_PATH];
+    char dir[MAX_PATH], path[MAX_PATH], key[MAX_PATH];
+    const char *catalog = (const char *)rb->global_settings->playlist_catalog_dir;
 
     sort_table(TRACKS);
     if (order_count == 0)
     {
         rb->splash(HZ * 2, "No plays logged yet");
-        return false;
+        return;
     }
 
-    if (!rb->dir_exists(PLAYLIST_DIR))
-        rb->mkdir(PLAYLIST_DIR);
+    rb->strlcpy(dir, catalog[0] ? catalog : PLAYLIST_DIR, sizeof(dir));
+    int len = rb->strlen(dir);
+    if (len > 1 && dir[len - 1] == '/')
+        dir[len - 1] = '\0';
+    if (!rb->dir_exists(dir))
+        rb->mkdir(dir);
+    rb->snprintf(path, sizeof(path), "%s/%s", dir, PLAYLIST_FILE);
 
-    int fd = rb->open(PLAYLIST_DIR "/" PLAYLIST_FILE,
-                      O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    int fd = rb->open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0)
     {
         rb->splash(HZ * 2, "Can't write playlist");
-        return false;
+        return;
     }
 
     int count = MIN(order_count, TOP_PLAYLIST);
-    for (int i = 0; i < count; i++)
+    bool ok = true;
+    for (int i = 0; ok && i < count; i++)
     {
         struct stat_entry *e = &tables[TRACKS].e[order[i]];
-        rb->fdprintf(fd, "%s\n", read_key(e->where, e->keylen, key, sizeof(key)));
+        ok = rb->fdprintf(fd, "%s\n", read_key(&e->key, key, sizeof(key))) > 0;
     }
-    rb->close(fd);
-
-    rb->splashf(HZ, "Saved %d tracks to %s", count, PLAYLIST_FILE);
-
-    if (rb->yesno_pop("Play it now?") &&
-        rb->playlist_create(PLAYLIST_DIR "/", PLAYLIST_FILE) != -1)
+    if (rb->close(fd) < 0 || !ok)
     {
-        rb->playlist_start(0, 0, 0);
-        return true;
+        rb->splash(HZ * 2, "Can't write playlist");
+        return;
     }
-    return false;
+
+    rb->splashf(HZ * 2, "Saved %d tracks to %s", count, path);
 }
 
 static bool setup_tables(void)
 {
     size_t size;
-    char *buf = rb->plugin_get_buffer(&size);
+
+    /* stopping first also writes out the plays the firmware held back */
+    rb->audio_stop();
+    char *buf = rb->plugin_get_audio_buffer(&size);
 
     /* tracks get 8 parts, albums 2, artists 1, plus a sort index per track */
-    int tracks = size / (11 * sizeof(struct stat_entry) / 8 + sizeof(uint32_t));
+    int tracks = MIN(size / (11 * sizeof(struct stat_entry) / 8 + sizeof(uint32_t)),
+                     (size_t)MAX_TRACKS);
     int sizes[NUM_TABLES] = { tracks, tracks / 4, tracks / 8 };
 
     for (int t = 0; t < NUM_TABLES; t++)
@@ -874,10 +909,7 @@ static enum plugin_status run_menu(void)
             case 2: show_top(ARTISTS, "Top Artists"); break;
             case 3: show_recent(); break;
             case 4: show_summary(); break;
-            case 5:
-                if (save_playlist())
-                    return PLUGIN_GOTO_WPS;
-                break;
+            case 5: save_playlist(); break;
             default: return PLUGIN_OK;
         }
     }
