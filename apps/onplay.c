@@ -64,6 +64,7 @@
 #include "pathfuncs.h"
 #include "shortcuts.h"
 #include "misc.h"
+#include "root_menu.h"
 
 static int onplay_result = ONPLAY_OK;
 static bool in_queue_submenu = false;
@@ -705,7 +706,29 @@ static int browse_id3_wrapper(void)
     return GO_TO_PREVIOUS;
 }
 
+/* Open the file browser in the playing track's folder, with the track
+   selected. Called from the WPS context menu, where selected_file.path is
+   the playing track. Return GO_TO_PREVIOUS to close the menu (any nonzero
+   value does, see MENU_FUNC_CHECK_RETVAL), or 0 to stay in it. */
+static int open_containing_folder(void)
+{
+    const char *path = selected_file.path;
+
+    if (!path || !file_exists(path))
+    {
+        splash(HZ * 2, ID2P(LANG_TRACK_NOT_FOUND));
+        return 0;
+    }
+
+    root_menu_browse_to(path);
+    onplay_result = ONPLAY_BROWSE;
+    return GO_TO_PREVIOUS;
+}
+
 /* CONTEXT_WPS items */
+MENUITEM_FUNCTION(open_folder_item, MENU_FUNC_CHECK_RETVAL,
+                  ID2P(LANG_OPEN_CONTAINING_FOLDER),
+                  open_containing_folder, NULL, Icon_file_view_menu);
 MENUITEM_FUNCTION(browse_id3_item, MENU_FUNC_CHECK_RETVAL, ID2P(LANG_MENU_SHOW_ID3_INFO),
                   browse_id3_wrapper, NULL, Icon_NOICON);
 
@@ -1119,7 +1142,7 @@ MAKE_ONPLAYMENU( wps_onplay_menu, ID2P(LANG_ONPLAY_MENU_TITLE),
 #endif
            &bookmark_menu,
            &plugin_item,
-           &browse_id3_item, &list_viewers_item,
+           &browse_id3_item, &open_folder_item, &list_viewers_item,
            &delete_file_item, &view_cue_item,
 #ifdef HAVE_PITCHCONTROL
            &pitch_menu,

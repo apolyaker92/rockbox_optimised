@@ -41,6 +41,7 @@ enum {
     ONPLAY_START_PLAY,
     ONPLAY_PLAYLIST,
     ONPLAY_PLUGIN,
+    ONPLAY_BROWSE,      /* open the file browser at root_menu_browse_to() */
 #ifdef HAVE_HOTKEY
     ONPLAY_FUNC_RETURN, /* for use in hotkey_assignment only */
 #endif

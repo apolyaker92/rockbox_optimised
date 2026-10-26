@@ -17079,3 +17079,31 @@
     *: "Listening Stats"
   </voice>
 </phrase>
+<phrase>
+  id: LANG_OPEN_CONTAINING_FOLDER
+  desc: in the WPS context menu, opens the playing track's folder in the file browser
+  user: core
+  <source>
+    *: "Open Containing Folder"
+  </source>
+  <dest>
+    *: "Open Containing Folder"
+  </dest>
+  <voice>
+    *: "Open Containing Folder"
+  </voice>
+</phrase>
+<phrase>
+  id: LANG_TRACK_NOT_FOUND
+  desc: splash when the playing track's file no longer exists
+  user: core
+  <source>
+    *: "Track not found"
+  </source>
+  <dest>
+    *: "Track not found"
+  </dest>
+  <voice>
+    *: "Track not found"
+  </voice>
+</phrase>
