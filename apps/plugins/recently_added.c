@@ -19,22 +19,23 @@
  ****************************************************************************/
 
 #include "plugin.h"
+#include "lib/library_folders.h"
 
 /*
  * Copying music keeps each file's date but makes its folders new, so a
  * folder's date says when it arrived.
  *
- * The library is the start directory, or /Music if none is set. Its
- * folders are categories, and what's listed is each folder inside one:
- * an artist in /Music/Albums/Artist/Album, a soundtrack in
- * /Music/OST/Soundtrack. An entry's date is the newest of its own and its
- * subfolders', so a new album brings its artist back to the top. Only
- * those two levels are read, never the tracks, which keeps it quick.
+ * What's listed is each folder inside the folders marked in Library
+ * Folders: an artist in an artists folder (/Music/Albums/Artist/Album), a
+ * soundtrack in an albums folder (/Music/OST/Soundtrack). With nothing
+ * marked, the start directory or /Music counts as an artists folder. An
+ * entry's date is the newest of its own and its subfolders', so a new
+ * album brings its artist back to the top. Only those two levels are
+ * read, never the tracks, which keeps it quick.
  *
  * Playback keeps going, as nothing here needs the audio buffer.
  */
 
-#define DEFAULT_LIBRARY "/Music"
 #define RECENT_DAYS     14
 #define MAX_ENTRIES     100
 
@@ -96,12 +97,12 @@ static uint32_t newest_date(const char *path, uint32_t own)
     return newest;
 }
 
-/* the entries in one category, false if cut short */
-static bool scan_category(const char *category)
+/* the entries in one library folder ("" for the root), false if cut short */
+static bool scan_folder(const char *folder)
 {
     static long next_progress;
     char path[MAX_PATH];
-    DIR *dir = rb->opendir(category);
+    DIR *dir = rb->opendir(folder[0] ? folder : "/");
     if (!dir)
         return true;
 
@@ -111,12 +112,12 @@ static bool scan_category(const char *category)
         uint32_t own = folder_date(dir, de);
         if (!own)
             continue;
-        rb->snprintf(path, sizeof(path), "%s/%s", category, de->d_name);
+        rb->snprintf(path, sizeof(path), "%s/%s", folder, de->d_name);
         add_entry(path, newest_date(path, own));
 
         if (TIME_AFTER(*rb->current_tick, next_progress))
         {
-            rb->splashf(0, "Scanning %s...", category);
+            rb->splashf(0, "Scanning %s...", folder[0] ? folder : "/");
             next_progress = *rb->current_tick + HZ / 2;
             if (rb->action_userabort(TIMEOUT_NOBLOCK))
             {
@@ -129,43 +130,18 @@ static bool scan_category(const char *category)
     return true;
 }
 
-/* the start directory, or /Music, or else the whole disk */
-static void library_folder(char *buf, int bufsz)
-{
-    const char *start = rb->global_settings->start_directory;
-
-    if (start[0] == '/' && start[1] != '\0')
-        rb->strlcpy(buf, start, bufsz);
-    else if (rb->dir_exists(DEFAULT_LIBRARY))
-        rb->strlcpy(buf, DEFAULT_LIBRARY, bufsz);
-    else
-        buf[0] = '\0';  /* the root, as paths are built with a '/' after */
-
-    int len = rb->strlen(buf);
-    if (len > 0 && buf[len - 1] == '/')
-        buf[len - 1] = '\0';
-}
-
 static bool scan_library(void)
 {
-    char library[MAX_PATH], category[MAX_PATH];
+    struct library_folder roots[LIBRARY_MAX_FOLDERS];
+    int count = library_roots(roots, ARRAYLEN(roots));
 
-    library_folder(library, sizeof(library));
-    DIR *dir = rb->opendir(library[0] ? library : "/");
-    if (!dir)
-        return true;
-
-    bool ok = true;
-    struct dirent *de;
-    while (ok && (de = rb->readdir(dir)))
+    entry_count = 0;
+    for (int i = 0; i < count; i++)
     {
-        if (!folder_date(dir, de))
-            continue;
-        rb->snprintf(category, sizeof(category), "%s/%s", library, de->d_name);
-        ok = scan_category(category);
+        if (!scan_folder(roots[i].path))
+            return false;
     }
-    rb->closedir(dir);
-    return ok;
+    return true;
 }
 
 /* drop what's older than RECENT_DAYS. A clock behind the newest folder
@@ -197,11 +173,19 @@ static const char *entry_name(int item, void *data, char *buf, size_t bufsz)
     return buf;
 }
 
-/* Select opens the folder in the file browser */
+static bool settings_requested;
+
+/* Select opens the folder in the file browser, the context menu button
+   opens Library Folders */
 static int entry_action(int action, struct gui_synclist *lists)
 {
     char path[MAX_PATH];
 
+    if (action == ACTION_STD_CONTEXT)
+    {
+        settings_requested = true;
+        return ACTION_STD_CANCEL;
+    }
     if (action != ACTION_STD_OK)
         return action;
 
@@ -223,19 +207,30 @@ enum plugin_status plugin_start(const void *parameter)
     struct simplelist_info info;
     (void)parameter;
 
-    if (!scan_library())
-        return PLUGIN_OK;
-    keep_recent();
-
-    if (entry_count == 0)
+    library_load();
+    for (;;)
     {
-        rb->splashf(HZ * 2, "Nothing added in the last %d days", RECENT_DAYS);
-        return PLUGIN_OK;
-    }
+        if (!scan_library())
+            return PLUGIN_OK;
+        keep_recent();
 
-    rb->simplelist_info_init(&info, "Recently Added", entry_count, NULL);
-    info.get_name = entry_name;
-    info.action_callback = entry_action;
-    rb->simplelist_show_list(&info);
-    return PLUGIN_OK;
+        if (entry_count == 0)
+        {
+            /* the folders may be set wrong, which is the time to fix them */
+            if (!rb->yesno_pop("Nothing added lately. Set Library Folders?") ||
+                !library_settings())
+                return PLUGIN_OK;
+            continue;
+        }
+
+        rb->simplelist_info_init(&info, "Recently Added", entry_count, NULL);
+        info.get_name = entry_name;
+        info.action_callback = entry_action;
+        settings_requested = false;
+        rb->simplelist_show_list(&info);
+
+        if (!settings_requested)
+            return PLUGIN_OK;
+        library_settings();
+    }
 }

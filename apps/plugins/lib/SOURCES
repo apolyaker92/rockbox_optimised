@@ -9,6 +9,7 @@ arg_helper.c
 md5.c
 jhash.c
 configfile.c
+library_folders.c
 playback_control.c
 rgb_hsv.c
 highscore.c
