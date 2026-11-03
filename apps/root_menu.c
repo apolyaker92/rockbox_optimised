@@ -458,18 +458,31 @@ static int load_bmarks(void* param)
     return GO_TO_PREVIOUS;
 }
 
-static int listen_stats(void* param)
+/* a plugin with its own main menu item, which may pick something to show
+   in the file browser */
+static int browsing_plugin(const char *path)
 {
-    (void)param;
     browse_to[0] = '\0';
-    int ret = plugin_load(PLUGIN_APPS_DIR "/listen_stats.rock", NULL);
+    int ret = plugin_load(path, NULL);
 
     if (ret == PLUGIN_GOTO_WPS)
         return GO_TO_WPS;
     if (ret == PLUGIN_OK && browse_to[0])
-        return GO_TO_FILEBROWSER;   /* a track, album or artist was picked */
+        return GO_TO_FILEBROWSER;   /* a track or folder was picked */
     browse_to[0] = '\0';
     return GO_TO_ROOT;
+}
+
+static int listen_stats(void* param)
+{
+    (void)param;
+    return browsing_plugin(PLUGIN_APPS_DIR "/listen_stats.rock");
+}
+
+static int recently_added(void* param)
+{
+    (void)param;
+    return browsing_plugin(PLUGIN_APPS_DIR "/recently_added.rock");
 }
 
 /* These are all static const'd from apps/menus/ *.c
@@ -510,6 +523,7 @@ static const struct root_items items[] = {
     [GO_TO_SYSTEM_SCREEN] = { miscscrn, &info_menu, &system_menu },
     [GO_TO_SHORTCUTMENU] = { do_shortcut_menu, NULL, NULL },
     [GO_TO_LISTEN_STATS] = { listen_stats, NULL, NULL },
+    [GO_TO_RECENTLY_ADDED] = { recently_added, NULL, NULL },
 
 };
 static const int nb_items = sizeof(items)/sizeof(*items);
@@ -559,6 +573,8 @@ MENUITEM_RETURNVALUE(system_menu_, ID2P(LANG_SYSTEM), GO_TO_SYSTEM_SCREEN,
                      NULL, Icon_System_menu);
 MENUITEM_RETURNVALUE(listen_stats_item, ID2P(LANG_LISTEN_STATS),
                      GO_TO_LISTEN_STATS, NULL, Icon_Audio);
+MENUITEM_RETURNVALUE(recently_added_item, ID2P(LANG_RECENTLY_ADDED),
+                     GO_TO_RECENTLY_ADDED, NULL, Icon_Folder);
 
 struct menu_item_ex root_menu_;
 static struct menu_callback_with_desc root_menu_desc = {
@@ -581,6 +597,7 @@ static struct menu_table menu_table[] = {
 #endif
     { "playlists", &playlists },
     { "listen_stats", &listen_stats_item },
+    { "recently_added", &recently_added_item },
     { "plugins", &rocks_browser },
     { "system_menu", &system_menu_ },
     { "shortcuts", &shortcut_menu },
