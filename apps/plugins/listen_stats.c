@@ -873,21 +873,29 @@ static const char *component(const char *path, int n, char *out, int outsz)
     return out;
 }
 
-/* name of the artist folder a track is counted under */
-static const char *track_artist(const char *path, char *out, int outsz)
+/* name of the folder ending at end in path, "" if none */
+static const char *folder_name(const char *path, int end, char *out, int outsz)
 {
-    int artist, album;
-
     out[0] = '\0';
-    library_artist_album(path, rb->strlen(path), &artist, &album);
-    if (artist <= 0)
+    if (end <= 0)
         return out;
 
-    int start = nth_last_slash(path, artist, 1) + 1;
-    int len = MIN(artist - start, outsz - 1);
+    int start = nth_last_slash(path, end, 1) + 1;
+    int len = MIN(end - start, outsz - 1);
     rb->memcpy(out, path + start, len);
     out[len] = '\0';
     return out;
+}
+
+/* names of the artist and album folders a track is counted under */
+static void track_folders(const char *path, char *artist, char *album,
+                          int outsz)
+{
+    int artist_end, album_end;
+
+    library_artist_album(path, rb->strlen(path), &artist_end, &album_end);
+    folder_name(path, artist_end, artist, outsz);
+    folder_name(path, album_end, album, outsz);
 }
 
 static const char *strip_ext(char *name)
@@ -896,6 +904,34 @@ static const char *strip_ext(char *name)
     if (dot && dot != name)
         *dot = '\0';
     return name;
+}
+
+/* a track's file name without its extension or a leading track number
+   ("01 ", "01 - ", "1-01 ", "01."). The number has to be two or three
+   digits followed by a separator, so titles like "1979" or "2 + 2 = 5"
+   are kept. */
+static const char *track_title(const char *path, char *out, int outsz)
+{
+    char *p = out;
+
+    strip_ext((char *)component(path, 0, out, outsz));
+    while (*p >= '0' && *p <= '9')
+        p++;
+    int digits = p - out;
+    if (digits > 0 && *p == '-' && p[1] >= '0' && p[1] <= '9')
+    {
+        /* disc-track, like 1-01 */
+        p++;
+        while (*p >= '0' && *p <= '9')
+            p++;
+        digits = 2;
+    }
+    if (digits < 2 || digits > 3 ||
+        (*p != ' ' && *p != '.' && *p != '-' && *p != '_'))
+        return out;
+    while (*p == ' ' || *p == '.' || *p == '-' || *p == '_')
+        p++;
+    return *p ? p : out;
 }
 
 static int compare_order(const void *a, const void *b)
@@ -926,16 +962,16 @@ static const char *top_name(int item, void *data, char *buf, size_t bufsz)
 {
     (void)data;
     struct stat_entry *e = &tables[order_table].e[order[item]];
-    char key[MAX_PATH], a[64], b[64];
+    char key[MAX_PATH], a[64], b[64], c[64];
 
     read_key(&e->key, key, sizeof(key));
 
     switch (order_table)
     {
         case TRACKS:
-            component(key, 0, a, sizeof(a));
+            track_folders(key, b, c, sizeof(b));
             rb->snprintf(buf, bufsz, "%lu  %s - %s", (unsigned long)e->plays,
-                         strip_ext(a), track_artist(key, b, sizeof(b)));
+                         track_title(key, a, sizeof(a)), b);
             break;
         case ALBUMS:
             rb->snprintf(buf, bufsz, "%lu  %s - %s", (unsigned long)e->plays,
@@ -1048,13 +1084,17 @@ static const char *recent_name(int item, void *data, char *buf, size_t bufsz)
 {
     (void)data;
     int i = recent_index(item);
-    char key[MAX_PATH], a[64], b[64], date[12];
+    char key[MAX_PATH], title[64], artist[64], album[64];
 
+    /* already in order, so no date: "Title - Album - Artist", or just
+       "Title - Album" for a soundtrack, which is its own artist */
     read_key(&recent[i].key, key, sizeof(key));
-    format_date(recent[i].time, date, sizeof(date));
-    component(key, 0, a, sizeof(a));
-    rb->snprintf(buf, bufsz, "%s  %s - %s", date, strip_ext(a),
-                 track_artist(key, b, sizeof(b)));
+    track_folders(key, artist, album, sizeof(artist));
+    const char *name = track_title(key, title, sizeof(title));
+    if (!rb->strcmp(album, artist))
+        rb->snprintf(buf, bufsz, "%s - %s", name, album);
+    else
+        rb->snprintf(buf, bufsz, "%s - %s - %s", name, album, artist);
     return buf;
 }
 
