@@ -105,8 +105,7 @@ static int last_slash(const char *path, int len)
     return -1;
 }
 
-/* a "Disc 1", "CD2" or "disk_3" folder inside an album */
-static bool is_disc_folder(const char *name, int len)
+bool library_is_disc_folder(const char *name, int len)
 {
     int n;
     if (len >= 4 && (!rb->strncasecmp(name, "disc", 4) ||
@@ -155,7 +154,7 @@ void library_artist_album(const char *path, int len, int *artist, int *album)
 
         *artist = folder;
         if (f->role == LIBRARY_ALBUMS || inside < 0 ||
-            is_disc_folder(path + folder + 1, inside - folder - 1))
+            library_is_disc_folder(path + folder + 1, inside - folder - 1))
             *album = folder;
         else
             *album = inside;
@@ -165,7 +164,7 @@ void library_artist_album(const char *path, int len, int *artist, int *album)
     /* the two folders above the track, past a disc folder */
     *album = last;
     int above = last > 0 ? last_slash(path, last) : -1;
-    if (above >= 0 && is_disc_folder(path + above + 1, last - above - 1))
+    if (above >= 0 && library_is_disc_folder(path + above + 1, last - above - 1))
         *album = above;
     *artist = *album > 0 ? last_slash(path, *album) : -1;
 }

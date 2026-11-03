@@ -47,6 +47,9 @@ extern int library_folder_count;
 
 void library_load(void);
 
+/* a "Disc 1", "CD2" or "disk_3" folder inside an album */
+bool library_is_disc_folder(const char *name, int len);
+
 /* where the artist and album folders end in a track's path, -1 if none */
 void library_artist_album(const char *path, int len, int *artist, int *album);
 

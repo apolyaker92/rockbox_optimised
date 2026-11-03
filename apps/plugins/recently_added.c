@@ -25,13 +25,14 @@
  * Copying music keeps each file's date but makes its folders new, so a
  * folder's date says when it arrived.
  *
- * What's listed is each folder inside the folders marked in Library
- * Folders: an artist in an artists folder (/Music/Albums/Artist/Album), a
- * soundtrack in an albums folder (/Music/OST/Soundtrack). With nothing
- * marked, the start directory or /Music counts as an artists folder. An
- * entry's date is the newest of its own and its subfolders', so a new
- * album brings its artist back to the top. Only those two levels are
- * read, never the tracks, which keeps it quick.
+ * What's listed is albums, from the folders marked in Library Folders:
+ * the ones in each artist's folder in an artists folder
+ * (/Music/Albums/Artist/Album), and each folder in an albums folder
+ * (/Music/OST/Soundtrack). With nothing marked, the start directory or
+ * /Music counts as an artists folder. Disc folders are part of their
+ * album, and an artist's folder holding tracks or only disc folders is an
+ * album itself. Only folders are read, never the tracks, which keeps it
+ * quick.
  *
  * Playback keeps going, as nothing here needs the audio buffer.
  */
@@ -82,8 +83,8 @@ static uint32_t folder_date(DIR *dir, struct dirent *de)
     return (info.attribute & ATTR_DIRECTORY) ? MAX(info.mtime, 1) : 0;
 }
 
-/* the newest of a folder's date and its subfolders' */
-static uint32_t newest_date(const char *path, uint32_t own)
+/* an album's date: the newest of its folder's and its disc folders' */
+static uint32_t album_date(const char *path, uint32_t own)
 {
     uint32_t newest = own;
     DIR *dir = rb->opendir(path);
@@ -97,12 +98,43 @@ static uint32_t newest_date(const char *path, uint32_t own)
     return newest;
 }
 
-/* the entries in one library folder ("" for the root), false if cut short */
-static bool scan_folder(const char *folder)
+/* the albums in an artist's folder, which is one itself if it holds no
+   album folders */
+static void scan_artist(const char *artist, uint32_t own)
+{
+    char path[MAX_PATH];
+    bool albums = false;
+    DIR *dir = rb->opendir(artist);
+    if (!dir)
+        return;
+
+    struct dirent *de;
+    while ((de = rb->readdir(dir)))
+    {
+        uint32_t date = folder_date(dir, de);
+        if (!date)
+            continue;
+        if (library_is_disc_folder(de->d_name, rb->strlen(de->d_name)))
+        {
+            own = MAX(own, date);
+            continue;
+        }
+        rb->snprintf(path, sizeof(path), "%s/%s", artist, de->d_name);
+        add_entry(path, date);
+        albums = true;
+    }
+    rb->closedir(dir);
+
+    if (!albums)
+        add_entry(artist, own);
+}
+
+/* the albums in one library folder ("" for the root), false if cut short */
+static bool scan_folder(const struct library_folder *folder)
 {
     static long next_progress;
     char path[MAX_PATH];
-    DIR *dir = rb->opendir(folder[0] ? folder : "/");
+    DIR *dir = rb->opendir(folder->path[0] ? folder->path : "/");
     if (!dir)
         return true;
 
@@ -112,12 +144,16 @@ static bool scan_folder(const char *folder)
         uint32_t own = folder_date(dir, de);
         if (!own)
             continue;
-        rb->snprintf(path, sizeof(path), "%s/%s", folder, de->d_name);
-        add_entry(path, newest_date(path, own));
+        rb->snprintf(path, sizeof(path), "%s/%s", folder->path, de->d_name);
+        if (folder->role == LIBRARY_ALBUMS)
+            add_entry(path, album_date(path, own));
+        else
+            scan_artist(path, own);
 
         if (TIME_AFTER(*rb->current_tick, next_progress))
         {
-            rb->splashf(0, "Scanning %s...", folder[0] ? folder : "/");
+            rb->splashf(0, "Scanning %s...",
+                        folder->path[0] ? folder->path : "/");
             next_progress = *rb->current_tick + HZ / 2;
             if (rb->action_userabort(TIMEOUT_NOBLOCK))
             {
@@ -138,7 +174,7 @@ static bool scan_library(void)
     entry_count = 0;
     for (int i = 0; i < count; i++)
     {
-        if (!scan_folder(roots[i].path))
+        if (!scan_folder(&roots[i]))
             return false;
     }
     return true;
@@ -167,13 +203,24 @@ static const char *entry_name(int item, void *data, char *buf, size_t bufsz)
     if (item == entry_count)
         return "Library Folders...";
 
+    /* "Album - Artist", the artist being the folder it's in, like
+       "Hollow Knight - OST" for a soundtrack */
+    const char *path = entries[item].path;
+    const char *album = rb->strrchr(path, '/');
+    const char *artist = album;
+    while (artist > path && artist[-1] != '/')
+        artist--;
+
     struct tm tm;
     time_t t = entries[item].time;
-    const char *name = rb->strrchr(entries[item].path, '/') + 1;
-
     rb->gmtime_r(&t, &tm);
-    rb->snprintf(buf, bufsz, "%04d-%02d-%02d  %s", tm.tm_year + 1900,
-                 tm.tm_mon + 1, tm.tm_mday, name);
+    if (artist < album)
+        rb->snprintf(buf, bufsz, "%04d-%02d-%02d  %s - %.*s",
+                     tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, album + 1,
+                     (int)(album - artist), artist);
+    else    /* a folder at the top of the disk */
+        rb->snprintf(buf, bufsz, "%04d-%02d-%02d  %s",
+                     tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, album + 1);
     return buf;
 }
 
