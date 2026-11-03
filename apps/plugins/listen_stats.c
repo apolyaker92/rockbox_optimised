@@ -778,9 +778,11 @@ static uint32_t period_cutoff(uint32_t now, uint32_t newest)
 {
     uint32_t span = period_days[period] * 24 * 60 * 60;
 
-    /* TODO: decide what to count from when the clock can't be trusted */
-    (void)newest;
-    return now > span ? now - span : 0;
+    /* a clock behind the newest play was reset, as when the battery ran
+       flat, so count from that play instead. One that runs ahead can't
+       be told from not having listened lately, so it is believed. */
+    uint32_t from = MAX(now, newest);
+    return from > span ? from - span : 0;
 }
 
 /* only the plays in the period: the newest archives reaching into it and
