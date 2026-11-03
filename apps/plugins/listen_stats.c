@@ -38,6 +38,11 @@
  * The tables live in the audio buffer, so playback is stopped while the
  * stats are open, and hold over a million tracks.
  *
+ * The lists can also cover only a recent period, like the last 3 months.
+ * The summary only has totals, so then it is left alone and the newest
+ * archives reaching into the period are read again with the current log,
+ * skipping older plays. That reads only as much as the period holds.
+ *
  * Summary lines:
  *   M <last archive merged>
  *   S <plays> <seconds> <first play> <last play>
@@ -51,7 +56,7 @@
 #define SUMMARY_BACKUP  "listen_stats.bak"
 #define SUMMARY_TEMP    LOG_DIR "/listen_stats.tmp"
 #define PLAYLIST_DIR    "/Playlists"    /* if no catalog folder is set */
-#define PLAYLIST_FILE   "Most Played.m3u8"
+#define PLAYLIST_NAME   "Most Played"
 #define MAX_LOGS        64  /* summary, archives not merged yet, current */
 #define MAX_TRACKS      (1 << 20)   /* more than any library, keeps
                                        clearing the tables quick */
@@ -97,6 +102,18 @@ static int recent_count, recent_next;
 
 static uint32_t total_plays, total_seconds, first_time, last_time;
 static uint32_t merged_through;     /* last archive in the summary */
+
+/* how far back the lists go; without a clock the log has no dates */
+enum { ALL_TIME, LAST_YEAR, LAST_3_MONTHS, LAST_MONTH, LAST_WEEK, NUM_PERIODS };
+static const struct opt_items period_names[NUM_PERIODS] = {
+    { "All Time", -1 }, { "Last 12 Months", -1 }, { "Last 3 Months", -1 },
+    { "Last Month", -1 }, { "Last Week", -1 },
+};
+#if CONFIG_RTC
+static const int period_days[NUM_PERIODS] = { 0, 365, 91, 30, 7 };
+#endif
+static int period = ALL_TIME;
+static uint32_t cutoff;     /* plays before it are left out, 0 = none */
 
 /* sorted view of one table for the list screens */
 static uint32_t *order;
@@ -229,7 +246,7 @@ static void parse_line(char *line, int log, uint32_t offset)
 {
     char *p = line;
     uint32_t time = parse_number(&p);
-    if (*p++ != ':')
+    if (*p++ != ':' || time < cutoff)
         return;
     uint32_t elapsed = parse_number(&p);
     if (*p++ != ':')
@@ -326,7 +343,7 @@ static bool read_log(int log)
     {
         if (line[0] == '#')
             ;
-        else if (log == 0)
+        else if (log == 0 && period == ALL_TIME)    /* the summary */
             parse_summary_line(line, offset);
         else
             parse_line(line, log, offset);
@@ -406,6 +423,74 @@ static int find_archives(uint32_t after, uint32_t *list, int max)
     return count;
 }
 
+#if CONFIG_RTC
+/* the newest archived logs, newest first, at most max of them */
+static int find_newest_archives(uint32_t *list, int max)
+{
+    int count = 0;
+    DIR *dir = rb->opendir(ARCHIVE_DIR);
+    if (!dir)
+        return 0;
+
+    /* the smallest ~n are the largest n */
+    struct dirent *de;
+    while ((de = rb->readdir(dir)))
+    {
+        uint32_t n = log_number(de->d_name, "", ARCHIVE_NAME);
+        if (n)
+            keep_smallest(list, &count, max, ~n);
+    }
+    rb->closedir(dir);
+
+    for (int i = 0; i < count; i++)
+        list[i] = ~list[i];
+    return count;
+}
+
+/* timestamp at the start of a log line, 0 if it isn't one */
+static uint32_t line_time(char *line)
+{
+    char *p = line;
+    uint32_t time = parse_number(&p);
+    return *p == ':' ? time : 0;
+}
+
+/* size of a log in LOG_DIR and the times of its first and last plays
+   (0 if none), or -1 if it can't be read */
+static off_t log_times(const char *name, uint32_t *first, uint32_t *last)
+{
+    static char line[LOG_LINE_MAX];
+    char path[MAX_PATH];
+
+    *first = *last = 0;
+    rb->snprintf(path, sizeof(path), LOG_DIR "/%s", name);
+    int fd = rb->open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    off_t size = rb->filesize(fd);
+
+    if (rb->read_line(fd, line, sizeof(line)) > 0)
+        *first = line_time(line);
+
+    /* the last line is within the last two line lengths; a seek lands
+       mid-line, so the first line read after one is partial */
+    off_t from = size - 2 * LOG_LINE_MAX;
+    if (from > 0)
+    {
+        rb->lseek(fd, from, SEEK_SET);
+        rb->read_line(fd, line, sizeof(line));
+    }
+    while (rb->read_line(fd, line, sizeof(line)) > 0)
+    {
+        uint32_t time = line_time(line);
+        if (time)
+            *last = time;
+    }
+    rb->close(fd);
+    return size;
+}
+#endif
+
 /* the highest archive number used, merged or not */
 static uint32_t last_archive(void)
 {
@@ -469,16 +554,42 @@ static bool archive_rotated_logs(void)
     return true;
 }
 
-/* the last key file read, kept open while a list is shown or saved */
-static int key_fd = -1;
-static int key_log = -1;
+/* the key files last read, kept open while a list is shown or saved.
+   A period's names are spread over a few logs and a list jumps between
+   them, so reopening one each time would make scrolling slow. */
+#define KEY_FILES   4
+static int key_fd[KEY_FILES] = { -1, -1, -1, -1 };
+static int key_log[KEY_FILES] = { -1, -1, -1, -1 };
+static int key_next;    /* the one to reuse next */
 
-static void close_key_file(void)
+static void close_key_files(void)
 {
-    if (key_fd >= 0)
-        rb->close(key_fd);
-    key_fd = -1;
-    key_log = -1;
+    for (int i = 0; i < KEY_FILES; i++)
+    {
+        if (key_fd[i] >= 0)
+            rb->close(key_fd[i]);
+        key_fd[i] = key_log[i] = -1;
+    }
+}
+
+static int key_file(int log)
+{
+    char path[MAX_PATH];
+
+    for (int i = 0; i < KEY_FILES; i++)
+    {
+        if (key_log[i] == log)
+            return key_fd[i];
+    }
+
+    int i = key_next;
+    key_next = (key_next + 1) % KEY_FILES;
+    if (key_fd[i] >= 0)
+        rb->close(key_fd[i]);
+    rb->snprintf(path, sizeof(path), LOG_DIR "/%s", log_names[log]);
+    key_fd[i] = rb->open(path, O_RDONLY);
+    key_log[i] = key_fd[i] >= 0 ? log : -1;
+    return key_fd[i];
 }
 
 /* read a stored key (path or path prefix) back from its log */
@@ -488,20 +599,9 @@ static char *read_key(const struct key *key, char *buf, int bufsz)
     if (key->log >= num_logs || key->len >= bufsz)
         return buf;
 
-    if (key->log != key_log)
-    {
-        char path[MAX_PATH];
-
-        close_key_file();
-        rb->snprintf(path, sizeof(path), LOG_DIR "/%s", log_names[key->log]);
-        key_fd = rb->open(path, O_RDONLY);
-        if (key_fd < 0)
-            return buf;
-        key_log = key->log;
-    }
-
-    if (rb->lseek(key_fd, key->offset, SEEK_SET) >= 0 &&
-        rb->read(key_fd, buf, key->len) == key->len)
+    int fd = key_file(key->log);
+    if (fd >= 0 && rb->lseek(fd, key->offset, SEEK_SET) >= 0 &&
+        rb->read(fd, buf, key->len) == key->len)
         buf[key->len] = '\0';
     return buf;
 }
@@ -565,7 +665,7 @@ static bool write_summary(uint32_t through)
                              (unsigned long)recent[r].time, key));
     }
 
-    close_key_file();
+    close_key_files();
     if (rb->close(fd) < 0)
         ok = false;
     if (!ok)
@@ -585,6 +685,27 @@ static bool write_summary(uint32_t through)
     return rb->rename(SUMMARY_TEMP, LOG_DIR "/" SUMMARY_FILE) >= 0;
 }
 
+static char *table_buf;     /* the audio buffer */
+static int max_tracks;      /* the most it fits */
+
+/* tables for up to tracks tracks, from the start of the buffer. A period
+   gets small ones, as clearing and sorting go through the whole table. */
+static void layout_tables(int tracks)
+{
+    char *buf = table_buf;
+
+    /* tracks get 8 parts, albums 2, artists 1, plus a sort index per track */
+    int sizes[NUM_TABLES] = { tracks, tracks / 4, tracks / 8 };
+
+    for (int t = 0; t < NUM_TABLES; t++)
+    {
+        tables[t].e = (struct stat_entry *)buf;
+        tables[t].size = sizes[t];
+        buf += sizes[t] * sizeof(struct stat_entry);
+    }
+    order = (uint32_t *)buf;
+}
+
 static void reset_stats(void)
 {
     for (int t = 0; t < NUM_TABLES; t++)
@@ -597,15 +718,17 @@ static void reset_stats(void)
     total_plays = total_seconds = first_time = last_time = 0;
     merged_through = 0;
     num_logs = 0;
-    close_key_file();
+    close_key_files();
 }
 
 /* summary, then archives not merged into it yet (merging them), then
    the current log */
-static bool load_stats(void)
+static bool load_all_time(void)
 {
     uint32_t archives[MAX_LOGS - 2];
 
+    cutoff = 0;
+    layout_tables(max_tracks);
     for (;;)
     {
         reset_stats();
@@ -646,6 +769,80 @@ static bool load_stats(void)
 
     add_log("playback.log");
     return read_log(num_logs - 1);
+}
+
+#if CONFIG_RTC
+/* the time a play has to be after to count in the chosen period, given
+   the clock's time now and the time of the newest play logged */
+static uint32_t period_cutoff(uint32_t now, uint32_t newest)
+{
+    uint32_t span = period_days[period] * 24 * 60 * 60;
+
+    /* TODO: decide what to count from when the clock can't be trusted */
+    (void)newest;
+    return now > span ? now - span : 0;
+}
+
+/* only the plays in the period: the newest archives reaching into it and
+   the current log, leaving the summary alone */
+static bool load_period(void)
+{
+    uint32_t archives[MAX_LOGS - 1];
+    char name[32];
+    uint32_t first, last, newest;
+
+    if (!archive_rotated_logs())
+        rb->splash(HZ * 2, "Can't move old logs, some left out");
+    int count = find_newest_archives(archives, ARRAYLEN(archives));
+
+    off_t size = log_times("playback.log", &first, &newest);
+    off_t bytes = MAX(size, 0);
+    if (!newest && count)
+    {
+        rb->snprintf(name, sizeof(name), "playback_archive/" ARCHIVE_NAME,
+                     (unsigned long)archives[0]);
+        log_times(name, &first, &newest);
+    }
+    cutoff = period_cutoff(rb->mktime(rb->get_time()), newest);
+
+    /* archives are in order, so stop at the first that starts before it */
+    int used = 0;
+    first = UINT32_MAX;
+    while (used < count && first >= cutoff)
+    {
+        rb->snprintf(name, sizeof(name), "playback_archive/" ARCHIVE_NAME,
+                     (unsigned long)archives[used++]);
+        size = log_times(name, &first, &last);
+        bytes += MAX(size, 0);
+    }
+    if (used == ARRAYLEN(archives) && first >= cutoff)
+        rb->splashf(HZ * 2, "Only the last %d logs fit", used);
+
+    /* every play line is well over 16 bytes, so this never runs short */
+    layout_tables(MIN(max_tracks, MAX(1024, (int)(bytes / 16))));
+    reset_stats();
+
+    /* oldest first, so Recently Played stays in order */
+    while (used > 0)
+    {
+        rb->snprintf(log_names[num_logs++], sizeof(log_names[0]),
+                     "playback_archive/" ARCHIVE_NAME,
+                     (unsigned long)archives[--used]);
+        if (!read_log(num_logs - 1))
+            return false;
+    }
+    add_log("playback.log");
+    return read_log(num_logs - 1);
+}
+#endif
+
+static bool load_stats(void)
+{
+#if CONFIG_RTC
+    if (period != ALL_TIME)
+        return load_period();
+#endif
+    return load_all_time();
 }
 
 /* path component counted from the end, 0 = last */
@@ -733,6 +930,20 @@ static const char *top_name(int item, void *data, char *buf, size_t bufsz)
 /* set when an entry was picked to be shown in the file browser */
 static bool browse_requested;
 
+/* the file browser on a track in its album, closing the list */
+static int browse_to_track(const char *path)
+{
+    if (path[0] != '/' || !rb->file_exists(path))
+    {
+        rb->splash(HZ * 2, "Track not found");
+        return ACTION_REDRAW;
+    }
+
+    rb->root_menu_browse_to(path);
+    browse_requested = true;
+    return ACTION_STD_CANCEL;
+}
+
 /* Select opens the file browser there: inside an album or artist's
    folder, or on a track in its album */
 static int top_action(int action, struct gui_synclist *lists)
@@ -747,13 +958,7 @@ static int top_action(int action, struct gui_synclist *lists)
     read_key(&e->key, key, sizeof(key) - 1);    /* room for the '/' */
 
     if (order_table == TRACKS)
-    {
-        if (key[0] != '/' || !rb->file_exists(key))
-        {
-            rb->splash(HZ * 2, "Track not found");
-            return ACTION_REDRAW;
-        }
-    }
+        return browse_to_track(key);
     else
     {
         if (key[0] != '/' || !rb->dir_exists(key))
@@ -769,17 +974,33 @@ static int top_action(int action, struct gui_synclist *lists)
     return ACTION_STD_CANCEL;
 }
 
-static void show_top(int t, const char *title)
+static const char *period_name(void)
+{
+    return (const char *)period_names[period].string;
+}
+
+static void splash_no_plays(void)
+{
+    rb->splash(HZ * 2, period == ALL_TIME ? "No plays logged yet" :
+                                            "No plays in this period");
+}
+
+static void show_top(int t, const char *name)
 {
     struct simplelist_info info;
+    char title[48];
 
     sort_table(t);
     if (order_count == 0)
     {
-        rb->splash(HZ * 2, "No plays logged yet");
+        splash_no_plays();
         return;
     }
-    rb->simplelist_info_init(&info, (char *)title, order_count, NULL);
+    if (period == ALL_TIME)
+        rb->strlcpy(title, name, sizeof(title));
+    else
+        rb->snprintf(title, sizeof(title), "%s, %s", name, period_name());
+    rb->simplelist_info_init(&info, title, order_count, NULL);
     info.get_name = top_name;
     info.action_callback = top_action;
     rb->simplelist_show_list(&info);
@@ -794,10 +1015,16 @@ static void format_date(uint32_t time, char *buf, int bufsz)
                  tm.tm_mon + 1, tm.tm_mday);
 }
 
+/* the newest play is shown first */
+static int recent_index(int item)
+{
+    return (recent_next - 1 - item + RECENT_MAX) % RECENT_MAX;
+}
+
 static const char *recent_name(int item, void *data, char *buf, size_t bufsz)
 {
     (void)data;
-    int i = (recent_next - 1 - item + RECENT_MAX) % RECENT_MAX;
+    int i = recent_index(item);
     char key[MAX_PATH], a[64], b[64], date[12];
 
     read_key(&recent[i].key, key, sizeof(key));
@@ -808,21 +1035,33 @@ static const char *recent_name(int item, void *data, char *buf, size_t bufsz)
     return buf;
 }
 
+static int recent_action(int action, struct gui_synclist *lists)
+{
+    char key[MAX_PATH];
+
+    if (action != ACTION_STD_OK)
+        return action;
+
+    int i = recent_index(rb->gui_synclist_get_sel_pos(lists));
+    return browse_to_track(read_key(&recent[i].key, key, sizeof(key)));
+}
+
 static void show_recent(void)
 {
     struct simplelist_info info;
 
     if (recent_count == 0)
     {
-        rb->splash(HZ * 2, "No plays logged yet");
+        splash_no_plays();
         return;
     }
     rb->simplelist_info_init(&info, "Recently Played", recent_count, NULL);
     info.get_name = recent_name;
+    info.action_callback = recent_action;
     rb->simplelist_show_list(&info);
 }
 
-static char summary[9][48];
+static char summary[10][48];
 
 static const char *summary_name(int item, void *data, char *buf, size_t bufsz)
 {
@@ -839,6 +1078,9 @@ static void show_summary(void)
     format_date(first_time, from, sizeof(from));
     format_date(last_time, to, sizeof(to));
 
+    if (period != ALL_TIME)
+        rb->snprintf(summary[n++], sizeof(summary[0]), "Period: %s",
+                     period_name());
     rb->snprintf(summary[n++], sizeof(summary[0]), "Plays: %lu",
                  (unsigned long)total_plays);
     rb->snprintf(summary[n++], sizeof(summary[0]), "Listened: %lu h %02lu min",
@@ -855,10 +1097,16 @@ static void show_summary(void)
         rb->snprintf(summary[n++], sizeof(summary[0]), "From: %s", from);
         rb->snprintf(summary[n++], sizeof(summary[0]), "To: %s", to);
     }
-    rb->snprintf(summary[n++], sizeof(summary[0]), "Logs merged: %lu",
-                 (unsigned long)merged_through);
-    rb->snprintf(summary[n++], sizeof(summary[0]), "Logs read: %d",
-                 num_logs - 1);
+    if (period == ALL_TIME)
+    {
+        rb->snprintf(summary[n++], sizeof(summary[0]), "Logs merged: %lu",
+                     (unsigned long)merged_through);
+        rb->snprintf(summary[n++], sizeof(summary[0]), "Logs read: %d",
+                     num_logs - 1);     /* not counting the summary */
+    }
+    else
+        rb->snprintf(summary[n++], sizeof(summary[0]), "Logs read: %d",
+                     num_logs);
 
     rb->simplelist_info_init(&info, "Summary", n, NULL);
     info.get_name = summary_name;
@@ -874,7 +1122,7 @@ static void save_playlist(void)
     sort_table(TRACKS);
     if (order_count == 0)
     {
-        rb->splash(HZ * 2, "No plays logged yet");
+        splash_no_plays();
         return;
     }
 
@@ -884,7 +1132,12 @@ static void save_playlist(void)
         dir[len - 1] = '\0';
     if (!rb->dir_exists(dir))
         rb->mkdir(dir);
-    rb->snprintf(path, sizeof(path), "%s/%s", dir, PLAYLIST_FILE);
+    /* one per period, so a recent one doesn't replace the all-time one */
+    if (period == ALL_TIME)
+        rb->snprintf(path, sizeof(path), "%s/" PLAYLIST_NAME ".m3u8", dir);
+    else
+        rb->snprintf(path, sizeof(path), "%s/" PLAYLIST_NAME " (%s).m3u8",
+                     dir, period_name());
 
     int fd = rb->open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0)
@@ -915,35 +1168,71 @@ static bool setup_tables(void)
 
     /* stopping first also writes out the plays the firmware held back */
     rb->audio_stop();
-    char *buf = rb->plugin_get_audio_buffer(&size);
+    table_buf = rb->plugin_get_audio_buffer(&size);
 
-    /* tracks get 8 parts, albums 2, artists 1, plus a sort index per track,
-       rounded up so the tables never run past the buffer */
-    int tracks = MIN(size / ((11 * sizeof(struct stat_entry) + 7) / 8 + sizeof(uint32_t)),
+    /* the parts layout_tables gives each track, rounded up so the tables
+       never run past the buffer */
+    max_tracks = MIN(size / ((11 * sizeof(struct stat_entry) + 7) / 8 + sizeof(uint32_t)),
                      (size_t)MAX_TRACKS);
-    int sizes[NUM_TABLES] = { tracks, tracks / 4, tracks / 8 };
-
-    for (int t = 0; t < NUM_TABLES; t++)
-    {
-        tables[t].e = (struct stat_entry *)buf;
-        tables[t].size = sizes[t];
-        buf += sizes[t] * sizeof(struct stat_entry);
-    }
-    order = (uint32_t *)buf;
-    return tracks > 16;
+    layout_tables(max_tracks);
+    return max_tracks > 16;
 }
+
+#if CONFIG_RTC
+static char period_item[32];    /* the menu shows the period chosen */
+
+static void update_period_item(void)
+{
+    rb->snprintf(period_item, sizeof(period_item), "Period: %s",
+                 period_name());
+}
+
+/* false if the stats couldn't be loaded for any period */
+static bool choose_period(void)
+{
+    int old = period;
+
+    rb->set_option("Period", &period, RB_INT, period_names, NUM_PERIODS,
+                   NULL);
+    update_period_item();
+    if (period == old || load_stats())
+        return true;
+
+    /* cut short, go back to what was shown */
+    period = old;
+    update_period_item();
+    return load_stats();
+}
+#endif
 
 static enum plugin_status run_menu(void)
 {
     MENUITEM_STRINGLIST(menu, "Listening Stats", NULL,
+#if CONFIG_RTC
+                        period_item,
+#endif
                         "Top Tracks", "Top Albums", "Top Artists",
                         "Recently Played", "Summary",
                         "Save Most Played Playlist", "Quit");
     int selection = 0;
 
+#if CONFIG_RTC
+    update_period_item();
+#endif
     for (;;)
     {
-        switch (rb->do_menu(&menu, &selection, NULL, false))
+        int item = rb->do_menu(&menu, &selection, NULL, false);
+#if CONFIG_RTC
+        if (item == 0)
+        {
+            if (!choose_period())
+                return PLUGIN_OK;
+            continue;
+        }
+        if (item > 0)
+            item--;
+#endif
+        switch (item)
         {
             case 0: show_top(TRACKS, "Top Tracks"); break;
             case 1: show_top(ALBUMS, "Top Albums"); break;
@@ -977,6 +1266,6 @@ enum plugin_status plugin_start(const void *parameter)
     enum plugin_status status = PLUGIN_OK;
     if (load_stats())
         status = run_menu();
-    close_key_file();
+    close_key_files();
     return status;
 }
