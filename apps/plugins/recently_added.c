@@ -160,9 +160,13 @@ static void keep_recent(void)
         entry_count--;
 }
 
+/* the entries, then a row for Library Folders so it's easy to find */
 static const char *entry_name(int item, void *data, char *buf, size_t bufsz)
 {
     (void)data;
+    if (item == entry_count)
+        return "Library Folders...";
+
     struct tm tm;
     time_t t = entries[item].time;
     const char *name = rb->strrchr(entries[item].path, '/') + 1;
@@ -175,21 +179,22 @@ static const char *entry_name(int item, void *data, char *buf, size_t bufsz)
 
 static bool settings_requested;
 
-/* Select opens the folder in the file browser, the context menu button
-   opens Library Folders */
+/* Select opens the folder in the file browser. The last row, or the
+   context menu button anywhere, opens Library Folders. */
 static int entry_action(int action, struct gui_synclist *lists)
 {
     char path[MAX_PATH];
 
-    if (action == ACTION_STD_CONTEXT)
+    if (action != ACTION_STD_OK && action != ACTION_STD_CONTEXT)
+        return action;
+
+    int item = rb->gui_synclist_get_sel_pos(lists);
+    if (action == ACTION_STD_CONTEXT || item == entry_count)
     {
         settings_requested = true;
         return ACTION_STD_CANCEL;
     }
-    if (action != ACTION_STD_OK)
-        return action;
 
-    int item = rb->gui_synclist_get_sel_pos(lists);
     rb->snprintf(path, sizeof(path), "%s/", entries[item].path);
     if (!rb->dir_exists(entries[item].path))
     {
@@ -223,7 +228,8 @@ enum plugin_status plugin_start(const void *parameter)
             continue;
         }
 
-        rb->simplelist_info_init(&info, "Recently Added", entry_count, NULL);
+        rb->simplelist_info_init(&info, "Recently Added", entry_count + 1,
+                                 NULL);
         info.get_name = entry_name;
         info.action_callback = entry_action;
         settings_requested = false;
