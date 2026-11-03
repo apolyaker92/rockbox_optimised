@@ -33,7 +33,10 @@
  * merge cut short by a crash is simply done again the next time.
  *
  * Tracks, albums and artists are counted by path, taking the album and
- * artist from the folders (/Music/Artist/Album/track). Only numbers and the
+ * artist from the folders. In the library (the start directory, or
+ * /Music) the artist is the folder in a category and the album the one in
+ * that: /Music/Albums/Artist/Album/track, while a soundtrack in
+ * /Music/OST/Soundtrack/track is its own artist and album. Only numbers and the
  * position of each name in the files are kept, names are read back when shown.
  * The tables live in the audio buffer, so playback is stopped while the
  * stats are open, and hold over a million tracks.
@@ -57,6 +60,7 @@
 #define SUMMARY_TEMP    LOG_DIR "/listen_stats.tmp"
 #define PLAYLIST_DIR    "/Playlists"    /* if no catalog folder is set */
 #define PLAYLIST_NAME   "Most Played"
+#define DEFAULT_LIBRARY "/Music"    /* if no start directory is set */
 #define MAX_LOGS        64  /* summary, archives not merged yet, current */
 #define MAX_TRACKS      (1 << 20)   /* more than any library, keeps
                                        clearing the tables quick */
@@ -180,20 +184,99 @@ static int nth_last_slash(const char *path, int len, int n)
     return -1;
 }
 
+/* the library folder, without a trailing '/', "" for the whole disk */
+static char library[MAX_PATH];
+static int library_len;
+
+/* the start directory, or /Music, like Recently Added */
+static void find_library(void)
+{
+    const char *start = rb->global_settings->start_directory;
+
+    if (start[0] == '/' && start[1] != '\0')
+        rb->strlcpy(library, start, sizeof(library));
+    else if (rb->dir_exists(DEFAULT_LIBRARY))
+        rb->strlcpy(library, DEFAULT_LIBRARY, sizeof(library));
+    else
+        library[0] = '\0';
+
+    library_len = rb->strlen(library);
+    if (library_len > 0 && library[library_len - 1] == '/')
+        library[--library_len] = '\0';
+}
+
+/* offset of the first '/' in path from i on, before len, or -1 */
+static int next_slash(const char *path, int i, int len)
+{
+    for (; i < len; i++)
+    {
+        if (path[i] == '/')
+            return i;
+    }
+    return -1;
+}
+
+/* a "Disc 1", "CD2" or "disk_3" folder inside an album */
+static bool is_disc_folder(const char *name, int len)
+{
+    int n = 0;
+    if (len >= 4 && (!rb->strncasecmp(name, "disc", 4) ||
+                     !rb->strncasecmp(name, "disk", 4)))
+        n = 4;
+    else if (len >= 2 && !rb->strncasecmp(name, "cd", 2))
+        n = 2;
+    else
+        return false;
+
+    while (n < len && (name[n] == ' ' || name[n] == '_' || name[n] == '-'))
+        n++;
+    return n < len && name[n] >= '0' && name[n] <= '9';
+}
+
+/* where the artist and album folders end in a track's path, -1 if none.
+   In the library they are the folder in a category and the one inside
+   it: /Music/Albums/Artist/Album, /Music/OST/Soundtrack. A soundtrack
+   holding its tracks, or its disc folders, is its own album. Elsewhere
+   they are the two folders above the track. */
+static void artist_album(const char *path, int len, int *artist, int *album)
+{
+    int last = nth_last_slash(path, len, 1);    /* before the file name */
+
+    if (len > library_len && path[library_len] == '/' &&
+        !rb->strncasecmp(path, library, library_len))
+    {
+        int category = next_slash(path, library_len + 1, last + 1);
+        int folder = category < 0 ? -1 : next_slash(path, category + 1, last + 1);
+        if (folder >= 0)
+        {
+            int inside = next_slash(path, folder + 1, last + 1);
+            *artist = folder;
+            *album = inside < 0 ||
+                     is_disc_folder(path + folder + 1, inside - folder - 1) ?
+                     folder : inside;
+            return;
+        }
+    }
+
+    *album = last;
+    *artist = nth_last_slash(path, len, 2);
+}
+
 static void count_track(const char *path, struct key key,
                         uint32_t plays, uint32_t secs, uint32_t time)
 {
     int len = key.len;
-    count_play(TRACKS, path, &key, plays, secs, time);
+    int artist, album;
 
-    int album = nth_last_slash(path, len, 1);
+    count_play(TRACKS, path, &key, plays, secs, time);
+    artist_album(path, len, &artist, &album);
+
     if (album > 0)
     {
         key.len = album;
         count_play(ALBUMS, path, &key, plays, secs, time);
     }
 
-    int artist = nth_last_slash(path, len, 2);
     if (artist > 0)
     {
         key.len = artist;
@@ -869,6 +952,23 @@ static const char *component(const char *path, int n, char *out, int outsz)
     return out;
 }
 
+/* name of the artist folder a track is counted under */
+static const char *track_artist(const char *path, char *out, int outsz)
+{
+    int artist, album;
+
+    out[0] = '\0';
+    artist_album(path, rb->strlen(path), &artist, &album);
+    if (artist <= 0)
+        return out;
+
+    int start = nth_last_slash(path, artist, 1) + 1;
+    int len = MIN(artist - start, outsz - 1);
+    rb->memcpy(out, path + start, len);
+    out[len] = '\0';
+    return out;
+}
+
 static const char *strip_ext(char *name)
 {
     char *dot = rb->strrchr(name, '.');
@@ -914,7 +1014,7 @@ static const char *top_name(int item, void *data, char *buf, size_t bufsz)
         case TRACKS:
             component(key, 0, a, sizeof(a));
             rb->snprintf(buf, bufsz, "%lu  %s - %s", (unsigned long)e->plays,
-                         strip_ext(a), component(key, 2, b, sizeof(b)));
+                         strip_ext(a), track_artist(key, b, sizeof(b)));
             break;
         case ALBUMS:
             rb->snprintf(buf, bufsz, "%lu  %s - %s", (unsigned long)e->plays,
@@ -1033,7 +1133,7 @@ static const char *recent_name(int item, void *data, char *buf, size_t bufsz)
     format_date(recent[i].time, date, sizeof(date));
     component(key, 0, a, sizeof(a));
     rb->snprintf(buf, bufsz, "%s  %s - %s", date, strip_ext(a),
-                 component(key, 2, b, sizeof(b)));
+                 track_artist(key, b, sizeof(b)));
     return buf;
 }
 
@@ -1264,6 +1364,7 @@ enum plugin_status plugin_start(const void *parameter)
 
     if (!setup_tables())
         return PLUGIN_ERROR;
+    find_library();
 
     enum plugin_status status = PLUGIN_OK;
     if (load_stats())
