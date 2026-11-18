@@ -45,7 +45,7 @@
 # Display Viewports
 %V(0,0,-,-,-)
 %?mh<%Vd(lockscreen)|%Vd(metadata)>
-%?Lh<%Vd(lyr)|%Vd(vis)>
+%?mh<|%?Lh<%Vd(lyr)|%Vd(vis)>>
 
 ##################################
 ##### Locked (BW Monochrome) #####
