@@ -36,6 +36,50 @@ Features:
 - **Listening Stats** in the main menu: top tracks, albums and artists, recently played, a summary, and a "Most Played" playlist, all from Rockbox's playback log, for all time or just the last 12 months, 3 months, month or week (Period, at the top of the menu, on players with a clock). Artist and album come from folder names, so it works without the database: normally the two folders above a track (`/Music/Artist/Album`). If your library is laid out differently, mark folders in Library Folders (in the stats menu): an artists folder holds artist folders, like `/Music/Albums`, and an albums folder holds albums that each count as their own artist, like `/Music/OST`. Disc folders ("Disc 1", "CD2") count as their album. Select on a track, album or artist opens it in the file browser. Old playback logs are merged into a summary (`.rockbox/listen_stats.dat`, with the logs kept in `.rockbox/playback_archive/`), so it opens quickly however long the history gets, and it has room for over a million tracks. Playback stops while the stats are open, and "Most Played" is saved to the playlist catalog folder (`/Playlists` unless set otherwise). It's also in Plugins > Applications as listen_stats.
 - **Recently Added** in the main menu: the albums and soundtracks added in the last two weeks, newest first, as "Album - Artist", from the dates of their folders (copying keeps a file's date but makes its folders new). It lists the folders inside the ones marked in Library Folders (shared with Listening Stats, and on the context menu here), so the albums in each artist's folder in an artists folder and each folder in an albums folder; with nothing marked, the start directory or `/Music` counts as an artists folder. Select opens the album in the file browser. Playback keeps going, and it's also in Plugins > Applications as recently_added.
 
+## Lyrics, band visualizer and shortcuts on the playing screen
+
+Skin tags for the playing screen. Nothing runs unless a theme uses them. A
+theme that does is in [themes/CrazyBitMonoLyrics](themes/CrazyBitMonoLyrics).
+
+| Tag | What it does |
+|---|---|
+| `%Lk(x,y,w,h)` | **Lyric box.** The current line word-wrapped (it never scrolls): the part already sung in the viewport colour, the rest grey, then the next line grey underneath. Says "Lyrics not found" when there is nothing to show. |
+| `%Ly` / `%Ly(n)` | The lyric line `n` away from the current one (default 0), as plain text. |
+| `%Lh` | True when the lyric area should show lyrics, for `%?Lh<lyrics\|bands>`. Follows the mode below. |
+| `%Lm` | `AUTO`, `LYR` or `BARS`, the current mode. |
+| `%Lz(x,y,w,h,vertical,noborder,bandN)` | One of eight band bars, `band0` (bass) to `band7` (treble). |
+
+**Lyrics** come from a `.lrc` with the same name as the audio file
+(`song.flac` and `song.lrc`). Lines with several time stamps, `[offset:]`, a
+byte order mark and word stamps like `<00:12.34>` (stripped) are handled.
+**Lines without a `[mm:ss.xx]` stamp are ignored.** A file with no stamps at
+all has nothing to show: automatic mode shows the bands instead, and lyrics
+only mode shows "Lyrics not found". At most 12 KB and 512 lines of a file are
+read, once when the track changes, so drawing a line costs a binary search.
+A plain `.lrc` only has when each line starts, so the grey-to-white sweep
+inside a line is an estimate spread over the line's duration (a line followed
+by a long pause is capped at about 90 ms a character).
+
+**Bands** are eight Goertzel filters, not an FFT, run ten times a second over a
+rolling copy of the last 4096 frames the mixer played (about 16 KB of RAM).
+The WPS wakes up ten times a second only while the lyric box or the bars are
+on screen, and without the peak meter's busy loop, which is why this is much
+lighter than the peak meters on an iPod Video.
+
+**Keys (iPod):** Select+Left cycles automatic / lyrics only / bands only,
+Select+Right holds the backlight on (press again to restore your timeouts),
+Select+Play is still the WPS hotkey. Other targets have the actions
+(`ACTION_WPS_LYRIC_MODE`, `ACTION_WPS_BACKLIGHT_HOLD`) but no keys for them.
+
+Tested on an iPod Video (5th gen) only.
+
+### Getting the fonts and lyrics
+
+- `tools/scan_chars.py MUSIC_ROOT chars.json` lists every character a library
+  uses, and `tools/fnt_sparse.py chars.json IN.fnt OUT.fnt [--wide]` keeps only
+  those glyphs in a font, so the theme's CJK fonts shrink from about 20 MB to
+  about 2 MB. See the theme's README.
+
 ## Is it safe?
 
 Every playlist change was checked in the Rockbox simulator against unmodified 4.0: the same inserts, shuffles and resumes, with the full playlist and resume file compared after each step. Both builds produced identical output, including a playlist at the 32,000-track limit, so resume files carry over in both directions and you can switch between this build and stock.

@@ -1,0 +1,83 @@
+# Theme forked by: ottop
+# CC-BY-SA https://creativecommons.org/licenses/by-sa/3.0/
+# Credits:
+# - Refer to the notice below for original credits
+# - Square Dot Digital-7 font: Sizenko Alexander / Style-7
+# - Galmuri font:
+#      Copyright © 2019–2025 Lee Minseo (quiple@quiple.dev)
+#      The font is under the SIL Open Font License, Version 1.1. https://openfontlicense.org/documents/OFL.txt
+# - LanaPixel font: Made by eishiya under CC-BY 4.0 https://creativecommons.org/licenses/by/4.0/
+
+
+# Notice from the fork I forked:
+
+# Theme by:chronicallyoffline/Cicumpunct Δ
+# CC-BY-SA
+# Credits to: chronicallyoffline for the theme he created, Chuck Lardo and D0-0K for inspiration and assets reused under CC-BY-SA and GPL V3 respectively,
+# Cicumpunct Δ
+# Date: 05-24-2025
+
+
+# Actual theme starts here
+
+# Disable Status Bar
+%wd
+
+# Disable Title
+#%?Lt<|>
+
+# Preload Font
+%Fl(2,07-LanaPixel-trim.fnt)
+%Fl(3,14-LanaPixel-trim.fnt)
+%Fl(4,20-digital7mono.fnt)
+
+# Preload Images
+%xl(battery,battery.bmp,0,0,10)
+%xl(playmodes,playmodes.bmp,0,0,9)
+%xl(usb,usb.bmp,0,0)
+
+#__USB screen
+%?if(%cs, =, 21)<%VI(clearScreen)%Vd(usb)|%VI(menu)%Vd(info)>
+
+#__Clear Screen
+%Vi(clearScreen,0,0,1,1,-)
+
+# Display Viewports
+
+# Menu
+%Vi(menu,20,50,280,165,-)%Vf(-)%Vb(-)
+
+# Menu Title
+%Vl(info,25,11,123,15,2)
+%al%Lt%s
+
+#Hold indicator
+%V(128,24,85,22,3)
+%Vf(ffffff)
+%?mh<LOCKED|>
+
+# Battery (numerical)
+#%Vl(info,273,17,27,13,2)
+#%ar%bl%%
+
+#__Now Playing
+%Vl(info,48,211,232,16,2)
+%?if(%mp, >, 1)<%al%s%it - %ia - %id %(%ss(0,4, %iy)%)|>
+
+# Playback Icons
+%Vl(info,27,213,13,13,-)
+%?if(%mp, >, 1)<%xd(playmodes,%mp)|>
+
+# Battery (graphical)
+%Vl(info,277,13,23,10,-)
+%?if(%bl,>,90)<%xd(battery,10)|%?if(%bl,>,80)<%xd(battery,9)|%?if(%bl,>,70)<%xd(battery,8)|%?if(%bl,>,60)<%xd(battery,7)|%?if(%bl,>,50)<%xd(battery,6)|%?if(%bl,>,40)<%xd(battery,5)|%?if(%bl,>,30)<%xd(battery,4)|%?if(%bl,>,20)<%xd(battery,3)|%?if(%bl,>,10)<%xd(battery,2)|%?if(%bl,>,-1)<%xd(battery,1)>>>>>>>>>>
+
+#__USB
+%Vl(usb,30,30,260,130,-)
+%xd(usb)
+
+%Vl(usb,20,180,280,-,3)
+%acUSB CONNECTED
+
+%Vl(usb,20,210,280,-,2)
+%acEject Before Disconnecting
