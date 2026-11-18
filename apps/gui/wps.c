@@ -63,6 +63,8 @@
 #include "wps.h"
 #include "statusbar-skinned.h"
 #include "skin_engine/wps_internals.h"
+#include "skin_engine/skin_vis.h"
+#include "skin_engine/skin_lyrics.h"
 #include "open_plugin.h"
 
 #define FF_REWIND_MAX_PERCENT 3 /* cap ff/rewind step size at max % of file */
@@ -788,7 +790,9 @@ long gui_wps_show(void)
         if (button && !IS_SYSEVENT(button) )
             storage_spin();
 
-        button = skin_wait_for_action(WPS, CONTEXT_WPS|ALLOW_SOFTLOCK, HZ/5);
+        /* wake up faster while the band visualizer is on screen */
+        button = skin_wait_for_action(WPS, CONTEXT_WPS|ALLOW_SOFTLOCK,
+                                      skin_vis_active() ? HZ/SKIN_VIS_FPS : HZ/5);
 
         /* Exit if audio has stopped playing. This happens e.g. at end of
            playlist or if using the sleep timer. */
@@ -804,6 +808,34 @@ long gui_wps_show(void)
 
         switch(button)
         {
+            case ACTION_WPS_LYRIC_MODE:
+            {
+                static const char *const names[] = {
+                    "Lyrics or bands: automatic", "Lyrics only", "Bands only"
+                };
+                splash(HZ, names[skin_lyrics_cycle_mode()]);
+                skin_request_full_update(WPS);
+                update = true;
+                break;
+            }
+#ifdef HAVE_BACKLIGHT
+            case ACTION_WPS_BACKLIGHT_HOLD:
+            {
+                static bool held = false;
+                held = !held;
+                /* 0 seconds means always on; leaving restores the settings */
+                backlight_set_timeout(held ? 0 : global_settings.backlight_timeout);
+#if CONFIG_CHARGING
+                backlight_set_timeout_plugged(held ? 0 :
+                                global_settings.backlight_timeout_plugged);
+#endif
+                backlight_on();
+                splash(HZ, held ? "Backlight always on" : "Backlight timeout restored");
+                skin_request_full_update(WPS);
+                update = true;
+                break;
+            }
+#endif
 #ifdef HAVE_HOTKEY
             case ACTION_WPS_HOTKEY:
             {

@@ -106,6 +106,8 @@ gui/viewport.c
 gui/skin_engine/skin_backdrops.c
 gui/skin_engine/skin_display.c
 gui/skin_engine/skin_engine.c
+gui/skin_engine/skin_lyrics.c
+gui/skin_engine/skin_vis.c
 gui/skin_engine/skin_parser.c
 gui/skin_engine/skin_render.c
 gui/skin_engine/skin_tokens.c

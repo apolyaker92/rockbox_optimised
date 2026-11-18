@@ -52,6 +52,7 @@
 
 #include "wps_internals.h"
 #include "skin_engine.h"
+#include "skin_lyrics.h"
 #include "statusbar-skinned.h"
 #include "root_menu.h"
 #ifdef HAVE_RECORDING
@@ -333,6 +334,13 @@ const char *get_id3_token(struct wps_token *token, struct mp3entry *id3,
                 }
                 snprintf(buf, buf_size, "%lu", 100 * elapsed / length);
                 return buf;
+
+            case SKIN_TOKEN_LYRICS:
+                return skin_lyrics_line(id3, elapsed, token->value.i);
+            case SKIN_TOKEN_LYRICS_AVAILABLE:
+                return skin_lyrics_wanted(id3) ? "y" : NULL;
+            case SKIN_TOKEN_LYRIC_MODE:
+                return skin_lyrics_mode_text();
 
             case SKIN_TOKEN_TRACK_STARTING:
                 {

@@ -229,6 +229,8 @@ static bool do_non_text_tags(struct gui_wps *gwps, struct skin_draw_info *info,
             if (do_refresh)
                 peak_meter_drawn = true;
             /* fall through to the progressbar code */
+        case SKIN_TOKEN_VIS_BAR:
+        case SKIN_TOKEN_LYRIC_BOX_DRAW:
         case SKIN_TOKEN_VOLUMEBAR:
         case SKIN_TOKEN_BATTERY_PERCENTBAR:
         case SKIN_TOKEN_SETTINGBAR:

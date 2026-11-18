@@ -70,6 +70,9 @@
 #include "skin_engine.h"
 #include "statusbar-skinned.h"
 #include "skin_display.h"
+#include "skin_vis.h"
+#include "skin_lyrics.h"
+#include "rbunicode.h"
 
 void skin_render(struct gui_wps *gwps, unsigned refresh_mode);
 
@@ -158,9 +161,189 @@ void ab_draw_markers(struct screen * screen, int capacity,
 
 #endif
 
+
+/* ---- lyric box (%Lk) ----------------------------------------------------
+ * Draws the current lyric line word-wrapped into the box, the part already
+ * sung in the viewport colour and the rest grey, then the next line grey
+ * underneath as far as there is room. No scrolling: text that doesn't fit
+ * is cut at the bottom of the box. */
+
+/* draw the bytes [a, b) of one wrapped row; the first `sung` characters of
+ * the row (counting from a) are drawn in fg, the rest in gray */
+static void lyric_draw_row(struct screen *display, struct font *pf,
+                           int x, int y, const unsigned char *a,
+                           const unsigned char *b, int sung,
+                           unsigned fg, unsigned gray)
+{
+    char buf[200];
+    const unsigned char *mid = a;
+    int w1 = 0;
+    size_t n;
+
+    while (sung-- > 0 && mid < b)
+    {
+        unsigned short c;
+        mid = utf8decode(mid, &c);
+        w1 += font_get_width(pf, c);
+    }
+    if (mid > b)
+        mid = b;
+
+#if LCD_DEPTH > 1
+    if (mid > a)
+    {
+        n = MIN((size_t)(mid - a), sizeof(buf) - 1);
+        memcpy(buf, a, n);
+        buf[n] = '\0';
+        display->set_foreground(fg);
+        display->putsxy(x, y, (unsigned char *)buf);
+    }
+    if (b > mid)
+    {
+        n = MIN((size_t)(b - mid), sizeof(buf) - 1);
+        memcpy(buf, mid, n);
+        buf[n] = '\0';
+        display->set_foreground(gray);
+        display->putsxy(x + w1, y, (unsigned char *)buf);
+    }
+    display->set_foreground(fg);
+#else
+    (void)gray; (void)fg; (void)w1; (void)mid;
+    n = MIN((size_t)(b - a), sizeof(buf) - 1);
+    memcpy(buf, a, n);
+    buf[n] = '\0';
+    display->putsxy(x, y, (unsigned char *)buf);
+#endif
+}
+
+/* word-wrap `text` into rows starting at `row`; returns the next free row.
+ * Breaks after spaces and after any CJK character. */
+static int lyric_wrap(struct screen *display, struct font *pf, int x, int y0,
+                      int w, int fh, int row, int maxrows,
+                      const char *text, int sung_chars,
+                      unsigned fg, unsigned gray)
+{
+    const unsigned char *p = (const unsigned char *)text;
+    const unsigned char *line = p, *brk = NULL;
+    int lw = 0, chars = 0, line_chars = 0, brk_chars = 0;
+
+    while (*p && row < maxrows)
+    {
+        unsigned short c;
+        const unsigned char *n = utf8decode(p, &c);
+        int cw = font_get_width(pf, c);
+
+        if (lw + cw > w && p > line)
+        {
+            const unsigned char *end = p;
+            int endchars = chars;
+            if (brk && brk > line)
+            {
+                end = brk;
+                endchars = brk_chars;
+            }
+            lyric_draw_row(display, pf, x, y0 + row * fh, line, end,
+                           sung_chars - line_chars, fg, gray);
+            row++;
+            p = end;
+            chars = endchars;
+            while (*p == ' ')
+            {
+                p++;
+                chars++;
+            }
+            line = p;
+            line_chars = chars;
+            lw = 0;
+            brk = NULL;
+            continue;
+        }
+        lw += cw;
+        p = n;
+        chars++;
+        if (c == ' ' || c >= 0x2E80)
+        {
+            brk = p;
+            brk_chars = chars;
+        }
+    }
+    if (*line && row < maxrows)
+    {
+        lyric_draw_row(display, pf, x, y0 + row * fh, line, p,
+                       sung_chars - line_chars, fg, gray);
+        row++;
+    }
+    return row;
+}
+
+static void draw_lyricbox(struct gui_wps *gwps, struct viewport *vp,
+                          struct progressbar *pb)
+{
+    struct screen *display = gwps->display;
+    struct wps_state *state = get_wps_state();
+    struct mp3entry *id3 = state->id3;
+    struct font *pf = font_get(vp->font);
+    const char *cur, *next;
+    int permille, fh = pf->height, row = 0;
+    int h = pb->height > 0 ? pb->height : vp->height - MAX(pb->y, 0);
+    int y = pb->y > 0 ? pb->y : 0;
+    int maxrows = h / fh;
+    unsigned fg = 0, gray = 0;
+
+    if (maxrows < 1)
+        maxrows = 1;
+    skin_vis_mark_active();                 /* redraw 10 times a second */
+
+    /* a dynamic tag isn't erased for us: clear the box before redrawing */
+    display->set_drawmode(DRMODE_SOLID|DRMODE_INVERSEVID);
+    display->fillrect(pb->x, y, pb->width, h);
+    display->set_drawmode(DRMODE_SOLID);
+#if LCD_DEPTH > 1
+    fg = display->get_foreground();
+    gray = LCD_RGBPACK(128, 128, 128);
+#endif
+    if (!id3 || !skin_lyrics_now(id3, id3->elapsed + state->ff_rewind_count,
+                                 &cur, &permille, &next))
+    {
+        /* no .lrc (or one without time stamps): say so, centred in the box */
+        static const char msg[] = "Lyrics not found";
+        const char *m = msg;
+        int mw = 0;
+        for (; *m; m++)
+            mw += font_get_width(pf, (unsigned char)*m);
+#if LCD_DEPTH > 1
+        display->set_foreground(gray);
+#endif
+        display->putsxy(pb->x + MAX(0, (pb->width - mw) / 2),
+                        y + MAX(0, (h - fh) / 2), (const unsigned char *)msg);
+#if LCD_DEPTH > 1
+        display->set_foreground(fg);
+#endif
+        return;
+    }
+    if (cur)
+    {
+        const unsigned char *q = (const unsigned char *)cur;
+        int nchars = 0;
+        for (; *q; q++)
+            if ((*q & 0xC0) != 0x80)
+                nchars++;
+        row = lyric_wrap(display, pf, pb->x, y, pb->width, fh, row, maxrows,
+                         cur, nchars * permille / 1000, fg, gray);
+    }
+    if (next && row < maxrows)
+        lyric_wrap(display, pf, pb->x, y, pb->width, fh, row, maxrows,
+                   next, 0, fg, gray);
+}
+
 void draw_progressbar(struct gui_wps *gwps, struct skin_viewport* skin_viewport,
                       int line, struct progressbar *pb)
 {
+    if (pb->type == SKIN_TOKEN_LYRIC_BOX_DRAW)
+    {
+        draw_lyricbox(gwps, &skin_viewport->vp, pb);
+        return;
+    }
     struct screen *display = gwps->display;
     struct viewport *vp = &skin_viewport->vp;
     struct wps_state *state = get_wps_state();
@@ -206,6 +389,15 @@ void draw_progressbar(struct gui_wps *gwps, struct skin_viewport* skin_viewport,
         val = pb->type == SKIN_TOKEN_PEAKMETER_LEFTBAR ? left : right;
         length = MAX_PEAK;
         end = peak_meter_scale_value(val, length);
+    }
+    else if (pb->type == SKIN_TOKEN_VIS_BAR)
+    {
+        length = 100;
+        end = skin_vis_band(pb->setting_offset);
+        /* a shorter bar must not leave the old one behind */
+        display->set_drawmode(DRMODE_SOLID|DRMODE_INVERSEVID);
+        display->fillrect(x, y, width, height);
+        display->set_drawmode(DRMODE_SOLID);
     }
     else if (pb->type == SKIN_TOKEN_LIST_SCROLLBAR)
     {

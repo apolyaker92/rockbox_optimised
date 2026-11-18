@@ -1089,6 +1089,7 @@ static int parse_progressbar_tag(struct skin_element* element,
     {
         eINVERT = 0, eNOFILL, eNOBORDER, eNOBAR, eSLIDER, eIMAGE,
         eBACKDROP, eVERTICAL, eHORIZONTAL, eNOTOUCH, eSETTING, eSETTING_OFFSET,
+        eBAND0, eBAND1, eBAND2, eBAND3, eBAND4, eBAND5, eBAND6, eBAND7,
         e_PB_TAG_COUNT
     };
 
@@ -1096,7 +1097,10 @@ static int parse_progressbar_tag(struct skin_element* element,
                  [eNOFILL] = "nofill", [eNOBORDER] = "noborder", [eNOBAR] = "nobar",
                  [eSLIDER] = "slider", [eIMAGE] = "image", [eBACKDROP] = "backdrop",
                  [eVERTICAL] = "vertical", [eHORIZONTAL] = "horizontal",
-                 [eNOTOUCH] = "notouch", [eSETTING] = "setting", [eSETTING_OFFSET] = "soffset", [e_PB_TAG_COUNT] = NULL};
+                 [eNOTOUCH] = "notouch", [eSETTING] = "setting", [eSETTING_OFFSET] = "soffset",
+                 [eBAND0] = "band0", [eBAND1] = "band1", [eBAND2] = "band2",
+                 [eBAND3] = "band3", [eBAND4] = "band4", [eBAND5] = "band5",
+                 [eBAND6] = "band6", [eBAND7] = "band7", [e_PB_TAG_COUNT] = NULL};
     int pb_op;
 
     while (curr_param < element->params_count)
@@ -1160,6 +1164,9 @@ static int parse_progressbar_tag(struct skin_element* element,
         }
         else if (pb_op == eHORIZONTAL)
             pb->horizontal = true;
+        else if (token->type == SKIN_TOKEN_VIS_BAND &&
+                 pb_op >= eBAND0 && pb_op <= eBAND7)
+            pb->setting_offset = pb_op - eBAND0;  /* which band to show */
 #ifdef HAVE_TOUCHSCREEN
         else if (pb_op == eNOTOUCH)
             suppress_touchregion = true;
@@ -1240,6 +1247,10 @@ static int parse_progressbar_tag(struct skin_element* element,
         token->type = SKIN_TOKEN_LIST_SCROLLBAR;
     else if (token->type == SKIN_TOKEN_SETTING)
         token->type = SKIN_TOKEN_SETTINGBAR;
+    else if (token->type == SKIN_TOKEN_VIS_BAND)
+        token->type = SKIN_TOKEN_VIS_BAR;
+    else if (token->type == SKIN_TOKEN_LYRIC_BOX)
+        token->type = SKIN_TOKEN_LYRIC_BOX_DRAW;
 
     pb->type = token->type;
 
@@ -2412,6 +2423,8 @@ static int skin_element_callback(struct skin_element* element, void* data)
                 case SKIN_TOKEN_PLAYER_PROGRESSBAR:
                 case SKIN_TOKEN_PEAKMETER_LEFT:
                 case SKIN_TOKEN_PEAKMETER_RIGHT:
+                case SKIN_TOKEN_VIS_BAND:
+                case SKIN_TOKEN_LYRIC_BOX:
                 case SKIN_TOKEN_LIST_NEEDS_SCROLLBAR:
 #ifdef HAVE_RADIO_RSSI
                 case SKIN_TOKEN_TUNER_RSSI:
@@ -2448,6 +2461,11 @@ static int skin_element_callback(struct skin_element* element, void* data)
                     break;
                 case SKIN_TOKEN_FILE_TEXT:
                     function = parse_filetext;
+                    break;
+                case SKIN_TOKEN_LYRICS:
+                    /* %Ly or %Ly(n): the line n away from the current one */
+                    token->value.i = element->params_count > 0 ?
+                                     get_param(element, 0)->data.number : 0;
                     break;
 #ifdef HAVE_BACKDROP_IMAGE
                 case SKIN_TOKEN_VIEWPORT_FGCOLOUR:
