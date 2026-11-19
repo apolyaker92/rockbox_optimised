@@ -119,32 +119,42 @@ def usable(rec, seconds):
 
 
 def lookup(artist, title, album, seconds, delay):
-    """-> (status, lrc_text). status: found, instrumental, plain, miss."""
-    saw_plain = False
-    for who in artist_variants(artist):
-        for name in title_variants(title):
-            for with_album in (True, False):
-                params = {"artist_name": who, "track_name": name}
-                if with_album and album:
-                    params["album_name"] = album
-                if seconds:
-                    params["duration"] = seconds
-                rec = get_json("/get", params, delay)
-                if not rec:
-                    continue
-                if usable(rec, seconds):
-                    return "found", rec["syncedLyrics"]
-                if rec.get("instrumental"):
-                    return "instrumental", None
-                saw_plain = saw_plain or bool(rec.get("plainLyrics"))
-            # search is looser: take the closest-length record with stamps
-            results = get_json("/search", {"track_name": name,
-                                           "artist_name": who}, delay) or []
-            results = [r for r in results if usable(r, seconds)]
-            if results:
-                best = min(results, key=lambda r: abs((r.get("duration") or 0)
-                                                      - seconds))
-                return "found", best["syncedLyrics"]
+    """-> (status, lrc_text). status: found, instrumental, plain, miss.
+
+    One exact lookup (the precise one, uses the album), then one search per
+    spelling of the artist and title. Few requests per track: a miss costs
+    two to four, not a dozen."""
+    saw_plain = saw_instrumental = False
+    spellings = [(who, name) for who in artist_variants(artist)
+                 for name in title_variants(title)]
+
+    params = {"artist_name": artist, "track_name": title}
+    if album:
+        params["album_name"] = album
+    if seconds:
+        params["duration"] = seconds
+    rec = get_json("/get", params, delay)
+    if rec:
+        if usable(rec, seconds):
+            return "found", rec["syncedLyrics"]
+        saw_instrumental = bool(rec.get("instrumental"))
+        saw_plain = bool(rec.get("plainLyrics"))
+
+    for who, name in spellings:
+        results = get_json("/search", {"track_name": name,
+                                       "artist_name": who}, delay) or []
+        good = [r for r in results if usable(r, seconds)]
+        if good:
+            best = min(good, key=lambda r: abs((r.get("duration") or 0)
+                                               - seconds))
+            return "found", best["syncedLyrics"]
+        near = [r for r in results
+                if not seconds or abs((r.get("duration") or 0) - seconds) <= 3]
+        saw_instrumental = saw_instrumental or any(r.get("instrumental")
+                                                   for r in near)
+        saw_plain = saw_plain or any(r.get("plainLyrics") for r in near)
+    if saw_instrumental and not saw_plain:
+        return "instrumental", None
     return ("plain" if saw_plain else "miss"), None
 
 
@@ -196,7 +206,8 @@ def main():
     print(f"{len(todo)} tracks have no .lrc; {skipped} asked about recently; "
           f"looking up {len(fresh)}{'' if args.apply else ' (dry run)'}")
 
-    counts = {"found": 0, "instrumental": 0, "plain": 0, "miss": 0}
+    counts = {"found": 0, "instrumental": 0, "plain": 0, "miss": 0,
+              "unwritable": 0}
     try:
         for i, path in enumerate(fresh, 1):
             artist, title, album, seconds = describe(path)
@@ -205,14 +216,17 @@ def main():
                 status, text = "miss", None
             else:
                 status, text = lookup(artist, title, album, seconds, args.delay)
-            counts[status] += 1
-            print(f"[{i}/{len(fresh)}] {status.upper():12} {label}")
             if status == "found" and args.apply:
                 out = os.path.splitext(path)[0] + ".lrc"
                 if not os.path.exists(out):
-                    with open(out, "w", encoding="utf-8", newline="\n") as f:
-                        f.write(text.rstrip("\n") + "\n")
-            if status != "found" and args.apply:
+                    try:
+                        with open(out, "w", encoding="utf-8", newline="\n") as f:
+                            f.write(text.rstrip("\n") + "\n")
+                    except OSError:             # e.g. a read-only folder
+                        status = "unwritable"
+            counts[status] += 1
+            print(f"[{i}/{len(fresh)}] {status.upper():12} {label}")
+            if status not in ("found", "unwritable") and args.apply:
                 cache[os.path.relpath(path, args.root)] = {"status": status, "ts": now}
             if args.apply and i % 50 == 0:      # survive a reboot mid-run
                 json.dump(cache, open(args.cache, "w", encoding="utf-8"))
